@@ -1,0 +1,60 @@
+     - how do parallelism and concurrency work?
+     - how does the garbage collector work?
+     - how is lazy evaluation implemented?
+
+     Storage
+      - the block layer
+      - generational GC
+      - parallel GC
+      - weak pointers(?)
+    - Threads and scheduling
+      - HECs
+      - lightweight threads
+      - foreign call-outs and call-ins
+      - load-balancing (not much to say here)
+      - Asynchronous exceptions              
+      - STM
+      - sparks
+      - MVar
+    - Lazy evaluation
+      - thunks       
+      - Blackholes (needs a whole paper to itself really :-)
+
+  We don't have to say much about the I/O manager, because it lives
+  outside the RTS and there's a good Haskell Symposium paper about it.
+  Probably a small section pointing out that we don't have one thread per
+  blocked I/O call, but the details are all handled by libraries and not
+  the RTS.
+
+  That leaves quite a few topics uncovered (profiling, bytecode, dynamic
+  linking, event logging, weak pointers, ...) but I think focussing on the
+  really important bits is important to bound the scale of the paper.
+
+    - Storage
+      - the block layer     (http://hackage.haskell.org/trac/ghc/wiki/Commentary/Rts/Storage/BlockAlloc)
+      - generational GC     (http://hackage.haskell.org/trac/ghc/wiki/Commentary/Rts/Storage/GC)        
+      - parallel GC         "Parallel generational-copying garbage collection with a block-structured heap" 2008
+                            "Multicore garbage collection with local heaps" 2011
+    - Threads and scheduling
+      - HECs                "Runtime Support for Multicore Haskell" 2009
+      - lightweight threads --"--
+      - sparks              --"--
+      - MVar                --"-- also "Concurrent Haskell" 1996
+      - foreign calls       "Extending the Haskell Foreign Function Interface with Concurrency" 2004
+      - async exceptions    "Asynchronous exceptions in Haskell" 2001 (API only)
+      - STM                 "Composable Memory Transactions" 2005    
+    - Lazy evaluation
+      - thunks              "Making a fast curry" 2006
+                            "Faster laziness using dynamic pointer tagging" 2007
+      - Blackholes          (probably just a bunch of blog posts, atm)          
+
+What is important here is the implementation, especially with respect to multicore.
+
+        Here's a reading list
+        http://hackage.haskell.org/trac/ghc/wiki/ReadingList
+
+        Could you update it with anything from your list below that isn't there?
+
+        Also the union of http://research.microsoft.com/en-us/people/simonpj/
+        and http://research.microsoft.com/en-us/um/people/simonpj/papers/papers.html
+        lists all papers I know about
