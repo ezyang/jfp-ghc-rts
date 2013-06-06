@@ -1,3 +1,6 @@
+could write an article about what makes ghc's runtime system
+special for Haskell, what the design is, etc.
+
      - how do parallelism and concurrency work?
      - how does the garbage collector work?
      - how is lazy evaluation implemented?

@@ -1,0 +1,51 @@
+HOW TO BUILD A GHC RUNTIME SYSTEM
+
+You're building a runtime for Haskell. Where are you going to start?!
+
+Well, Haskell is a managed memory language.  So you decide that you need to build a garbage collector.
+
+Your first idea is to do generational garbage collection, because that's what everyone does, most garbage dies young.  This is true in most languages, but this is especially true in functional programming languages, where programs allocate a lot of memory. They allocate so much, that objects should not be promoted eagerly; they should be aged.
+
+Where is the memory coming from?  Stupid thing is to just allocate a big honking block, but that's annoying.  Idea: heap is not a contiguous piece of memory, but a bunch of chained together blocks.  (Knock on effect: large objects can be pinned to blocks BF_LARGE. But watch out for fragmentation.)  (some details about how it works, esp. megablocks and interaction with OS memory allocator, and dealing with the free lists)
+
+How do we identify pointers?  Idea: require every heap object to be boxed, and store an info table saying what the pointers are.  Note: what is all of the # nonsense about? Well, if a value is unboxed, operations on it are really fast, but it can never hit the heap.
+
+OK, but generational garbage collection has the classic problem where old generations may point into young generation? But Haskell doesn't mutate very much, so we can do something stupid to deal with mutation: remembered sets.  (point out some of the stupid things we've done with arrays, etc in the past; need to manually add write barriers to those ops)
+
+But that's not true: Haskell laziness means that we have to update a value when it gets evaluated.  Easy: eager promotion: if old generation ends up pointing to young generation (due to a write-once), promote the new object to the old generation.  Notice: need to scavenge old generations first!
+
+OK, but we want to make it even faster.  Idea: parallel garbage collection.  How is work split up?  It is split up using the blocks.  (More details: partly free list).  Note: all of the old GC state now has to be made thread-local (some of it wasn't, for a while)  This is a good idea, and other languages should use this technique too! (Or maybe there's a reason why it doesn't work so well in other cases?)
+
+# (Is this in GHC???) OK, but we want to make it even faster.  Idea: concurrent minor collection.  Idea, processor has exclusive access to local heap.  How to deal about globalization?  Transitive globalization has problems.
+
+What are the roots?  Intuitively, whatever is "executing" on the heap is the roots. But we haven't talked about what executes in Haskell yet.
+
+GC summary:
+    - Block(start, free, link, gc metadata)
+    - Nursery is a bunch of blocks
+    - A generation is a bunch of blocks + large objects (synchronized) + threads(?);
+      linked to a "to generation"
+    - gcthread unit of parallel collection, containing thread-local data;
+      per generation (the workspace) has todo blocks and a scavenged list, also the
+      part list optimization ** what's the overflow thing for?
+    - Collection: collects all gens up to some point; does an evacuate
+      and scavenge
+**  Cheney's algorithm
+    - Evacuation: figure out what block it's going into, and then copy
+      the object there; note, can only do this ONCE, so if it needs to happen
+      twice gotta put it in remembered set
+    - Scavenge: looks at all the pointers and evacuates their contents
+      (going from old generation to new)
+** what is a mark stack?
+    - Detail: thunk selector evaluation, to prevent GC from holding onto
+      memory too long (defer?)
+
+** defer pinned objects
+** defer CAFs
+** defer static objects (HEAP_ALLOCED)
+
+Let's talk about the roots.  You need an execution context. Obviously it needs a stack.  But that's not all; Haskell has threads, so you'll need multiple execution contexts.  OK: so let's give every context an object (TSO) and a stack (STACK)
+
+Where does the memory for this come from? Idea: store them on the heap!  But then you still need a root.  Use the RUN QUEUE as a root.
+
+

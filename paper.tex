@@ -13,6 +13,16 @@
 
 \section{Introduction}
 
+The GHC runtime system is perhaps one of the most unusual language
+runtimes in wide use today.  Much of its implementation was directly
+motivated by the unusual (by popular programming language standards!)
+features in Haskell which the runtime needs to support.  Some of these
+features, e.g. lazy evaluation and ubiquitous concurrency, complicate
+the design of the system and require us to do a lot more work to give
+programmers the high-level behavior they desire.  Other features, such
+as an emphasis on pure computation without mutation, simplify the design
+components such as garbage collection and software transactional memory.
+
 \input{storage.tex}
 \input{threads.tex}
 \input{evaluation.tex}
