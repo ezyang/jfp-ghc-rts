@@ -35,7 +35,7 @@
 %%
 
 \NeedsTeXFormat{LaTeX2e}[1997/12/01]
-\ProvidesClass{jfp}[2001/09/27 v1.02 Journal of Functional Programming
+\ProvidesClass{jfp1}[2001/09/27 v1.02 Journal of Functional Programming
   ^^Jdocument class]
 
 \newif\ifprodtf
