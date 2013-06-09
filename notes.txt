@@ -49,6 +49,7 @@ special for Haskell, what the design is, etc.
     - Lazy evaluation
       - thunks              "Making a fast curry" 2006
                             "Faster laziness using dynamic pointer tagging" 2007
+                            "Haskell on a shared memory multiprocessor"
       - Blackholes          (probably just a bunch of blog posts, atm)          
 
 What is important here is the implementation, especially with respect to multicore.

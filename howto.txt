@@ -2,23 +2,45 @@ HOW TO BUILD A GHC RUNTIME SYSTEM
 
 You're building a runtime for Haskell. Where are you going to start?!
 
+Some big questions
+------------------
+
+- How much technical detail should specific sections go into?
+- Should sections be divided in a way that some "details" are not
+  presented until later (versus considering all of the problems at once)
+- Should exceptions be introduced before or after the execution model of
+  Haskell is discussed?
+
+GARBAGE COLLECTOR
+-----------------
+
 Well, Haskell is a managed memory language.  So you decide that you need to build a garbage collector.
 
 Your first idea is to do generational garbage collection, because that's what everyone does, most garbage dies young.  This is true in most languages, but this is especially true in functional programming languages, where programs allocate a lot of memory. They allocate so much, that objects should not be promoted eagerly; they should be aged.
 
 Where is the memory coming from?  Stupid thing is to just allocate a big honking block, but that's annoying.  Idea: heap is not a contiguous piece of memory, but a bunch of chained together blocks.  (Knock on effect: large objects can be pinned to blocks BF_LARGE. But watch out for fragmentation.)  (some details about how it works, esp. megablocks and interaction with OS memory allocator, and dealing with the free lists)
+    Citation: DEB94 "Don't stop the BIBOP"
+              Ste77 "Data representations in PDP-10 MacLISP"
 
 How do we identify pointers?  Idea: require every heap object to be boxed, and store an info table saying what the pointers are.  Note: what is all of the # nonsense about? Well, if a value is unboxed, operations on it are really fast, but it can never hit the heap.
+    So we need to talk a little bit about closure representation. At this point, if we just have some nondescript closure this is reasonable
+    Pointers-first versus bitmap
+    Need to talk about the stack, and temporary values in memory!
+        JVM, CLR use a different technique, where they define the stack layout at *EVERY POINT IN THE BYTECODE*
 
 OK, but generational garbage collection has the classic problem where old generations may point into young generation? But Haskell doesn't mutate very much, so we can do something stupid to deal with mutation: remembered sets.  (point out some of the stupid things we've done with arrays, etc in the past; need to manually add write barriers to those ops)
 
 But that's not true: Haskell laziness means that we have to update a value when it gets evaluated.  Easy: eager promotion: if old generation ends up pointing to young generation (due to a write-once), promote the new object to the old generation.  Notice: need to scavenge old generations first!
 
 OK, but we want to make it even faster.  Idea: parallel garbage collection.  How is work split up?  It is split up using the blocks.  (More details: partly free list).  Note: all of the old GC state now has to be made thread-local (some of it wasn't, for a while)  This is a good idea, and other languages should use this technique too! (Or maybe there's a reason why it doesn't work so well in other cases?)
+    What about claiming objects for evacuation? (You can only do it once, see evacuation below)
+    Termination criterion FDSZ01 (check for zero running threads)
+    Citation FDSZ01
+             ABCS01
 
-# (Is this in GHC???) OK, but we want to make it even faster.  Idea: concurrent minor collection.  Idea, processor has exclusive access to local heap.  How to deal about globalization?  Transitive globalization has problems.
+What are the roots?  Intuitively, whatever is "executing" on the heap is the roots. But we haven't talked about what executes in Haskell yet: more soon!
 
-What are the roots?  Intuitively, whatever is "executing" on the heap is the roots. But we haven't talked about what executes in Haskell yet.
+Note: empirically, evacuate() is the most important function for the performance of GC. "Now you know!"
 
 GC summary:
     - Block(start, free, link, gc metadata)
@@ -40,12 +62,186 @@ GC summary:
     - Detail: thunk selector evaluation, to prevent GC from holding onto
       memory too long (defer?)
 
+Citation "Parallel generational-copying garbage collection with a block-structured heap"
+Citation Cheney "A nonrecursive list compacting algorithm"
+
 ** defer pinned objects
 ** defer CAFs
 ** defer static objects (HEAP_ALLOCED)
 
-Let's talk about the roots.  You need an execution context. Obviously it needs a stack.  But that's not all; Haskell has threads, so you'll need multiple execution contexts.  OK: so let's give every context an object (TSO) and a stack (STACK)
+THREADS
+-------
 
-Where does the memory for this come from? Idea: store them on the heap!  But then you still need a root.  Use the RUN QUEUE as a root.
+We've talked about how to allocate data. What does the runtime need to
+support operating on this data?  At the very least, need to know about
+the execution context to do GC properly (with concurrency, need to know more.)
 
+What is an execution context?  Primarily, it is a STACK.  We need a way to
+let the GC know what values on the stack are pointers and what are not.  So
+reuse the info table layout!  (*** some nonsense about SRTs)  Stack frames/activation
+records are also objects.
+    Detail: "stack stubbing" mark live variables dead by replacing new stack frame
+    requires bitmap layout
 
+Sometimes, we will need to temporarily suspend execution to run a
+garbage collection.  Constraint on code generation: there need to be
+safe points to run the GC (otherwise you might accidentally be in the
+middle of constructing a stack frame when you serviced an interrupt to
+GC).  Easy thing to do: check on HEAP ALLOCATION.
+
+OK, this works OK, but what about concurrent Haskell?  Concurrent
+Haskell has a few parameters:
+    1. Processes
+    2. Atomically mutable state, i.e. mechanisms for communicating between processes
+
+Naive idea: give each process its own OS thread (one-to-one).  Better idea: multiple
+lightweight threads mapped onto a single operating system thread (multiplexed).  This is
+cheap because we don't have to interact with expensive OS thread facilities.
+
+Let us presuppose that we want multiplexing.  We now have a gap: "OS threads" ~~~~ "Haskell threads", this has consequences.
+
+First, decouple Haskell thread representation from OS. Stacks are no longer OS stacks, thread now needs to store more information (e.g. the "thread-local" errno number, what the thread ID is, what the thread's run status is, what capability the thread is running on--this bit is important for IPC).  So turn this into first-class objects and store them on the heap.  (Implementation detail: one monolithic stack or stack chunks? GHC's changed its mind over the years, now we use stack chunks).  Performance note: stacks have dirty bits, so we don't have to repeatedly scan them when threads haven't run.
+
+Second, we need to map Haskell threads onto operating system threads, so they actually can run.
+
+Idea: take your operating system threads (call it a Haskell Execution Context or Capability), and give them a run queue of Haskell threads (a simple doubly linked list--this means TSOs are MUTABLE with POINTERS to STATE--recall GC injunctions).  The loop goes:
+
+    while(1) {
+        tso = popRunQueue(cap)
+        result = StgRun(tso)
+        case result of
+            out of heap -> re-enqueue tso; call GC
+                Note about large blocks: need to add the large block to the nursery which is per CAPABILITY, try to run the thread immediately afterwards
+            out of stack -> enlarge stack; re-enqueue tso
+            time expired -> put tso on end of queue
+                Note about how the context switch timer works: it sets a variable (Hp) which then causes Haskell to boot out of the loop and back to the scheduler
+            finished -> continue
+    }
+
+Notice: Garbage collecting processes: the RUN QUEUE is the root!  (If the system is deadlocked, a GC can identify groups of deadlocked threads... but see later about resurrecting threads with exceptions--this requires us to talk about weak pointers)
+
+Note: garbage collection requires ALL capabilities to be acquired, since we do NOT have a concurrent collector.  Do a 'requestSync' which sets a flag causing capabilities to give up when they run out, does the same thing as the context switch timer to boot them out.  Parallel GC reuses the capabilities.  This is Haskell's "stop the world", similar things occur when the number of capabilities change
+
+** Some amount of delicacy deciding when a GC is appropriate
+
+ABI NOTES ABOUT STACKS
+----------------------
+
+C stack is used for temporary data
+Haskell stack is NOT used for temporary data
+
+Every entry on the Haskell stack has an info table, just like heap objects.  These info tables point to code, which is how "return works". (As it turns out, heap objects also get code, but that has to do with laziness!)  So the stack is unsuitable for storing data temporarily, e.g. when you've run out of registers.
+
+    - put stack onto the heap (reifying control for resumability)
+    - stack frames do not necessarily correspond directly to structure
+      of code.  Lots of Haskell code will push multiple stack frames.  So they are a bunch of continuations!
+
+Since data on the C stack could point to the heap, when we hit a GC all of that data needs to be pushed into an info table.  So clearly a GC cannot happen "just anywhere."  Thus, GC's can only occur at the *starts* of functions (e.g. when we are doing the heap check)
+
+Returning on the stack is single return
+
+Info tables are a nice intensional structure, so there are some "wired-in" info tables which the runtime system handles manually. Examples:
+
+    - stg_upd_frame (and variants)
+    - stg_stack_underflow_frame (UNDERFLOW_FRAME) ~~ also notice with stack chunks have to
+      copy data and deal with running out of info on a chunk; also stg_stop_thread (STOP_FRAME)
+    - CATCH_FRAME
+    - ATOMICALLY_FRAME
+    - CATCH_STM_FRAME
+    - CATCH_RETRY_FRAME
+
+Like most other stack based languages, we walk up the stack when making non-local jumps of control
+
+FFI AND THREADS
+----------------
+
+FFI (if you're not interested in how to support FFI, can skip this section) ~~ tied to load balancing
+    Citation: Extending the Haskell Foreign Function Interface with Concurrency
+        Note: this paper predates multithreaded Haskell execution (XXX what changed?)
+        Update: "Another OS thread is waiting for capability because of foreign call-in", I think
+            with concurrent Haskell that's just not necessary
+    This multiplexing design is very simple, and the obvious thing to do.  But there are problems: consider blocking foreign calls (other problems described in the paper: thread-local state in FFI, multi-threaded clients, callbacks)--unification of mechanism! (so bound threads are generated by incalls)
+
+    Idea: BOUND thread.  Intuitively, foreign functions invoked on bound thread run on associated OS thread.  TSOs now need to have a pointer to an InCall structure (bound)
+
+    New operations to support:
+         Haskell <-----------------> Foreign
+      bound/unbound  (return)   native/recursive
+
+    Modification to scheduler loop:
+        maybeYieldCapability
+            checks if GC is happening, or
+                   cap->returning_tasks_hd != NULL (task is returning from foreign call),
+                   or the bound case seen below...
+        tso = popRunQueue
+        if (tso->bound) {
+            if tso bound to this task, OK
+            otherwise, give the capability to the proper task (implemented by shouldYieldCapability and releaseCapability)
+        } else {
+            if this is an incall, yield the capability to another task (essentially, don't want to use a native thread that someone else may need to run random other Haskell code)
+        }
+
+        when the thread finishes
+
+        in compiled code, safe foreign calls give up capability to another worker (suspendThread/resumeThread, putting the tso into an suspended ccalling threads; read this code to figure out what is going on here)
+
+        Something about 'Passing around the Capability'
+
+    Important invariant: if our capability is put on the wrong task, then the "correct" task is sleeping.  (Actually, one might hope to arrange things so that the capability is never put on the wrong task, but maybe if there are some unbound threads this is fine.)  This comes from another invariant: an OS thread can be bound to at most ONE Haskell thread (so if you create a new Haskell thread which needs to share the state, you need to arrange for the original thread to run your calls!)
+
+    Unbound threads execute on worker threads.
+
+    Load balancing: want to push a thread from one capability to another.  Ordinarily, you'd have to synchronize this (since they're running on different threads). Idea: only want to push work if there are IDLE capabilities (otherwise, it doesn't help much.) Now, since capabilities are decoupled from OS threads, an idle capability is NOT RUNNING and so you can just take the lock on it, stuff some threads on it, and then animate it.
+        Simple extension: "locked" flag, which prevents threads from being pushed between capabilities
+
+** Also talk about stable pointer design... (it's a giant hash table)
+
+INTERPROCESS COMMUNICATION: MVARS
+---------------------------------
+
+Interprocess communication!
+
+Stupid way to do it: add locks, mutexes and the other usual suspects
+
+Idea: we manage the scheduling of processes ourselves.  So what if we have a system where one thread can hand of execution to another thread with out incurring a roundtrip through an OS context switch
+
+XXX this will be pretty easy to explain, and I've looked at this closely
+
+INTERPROCESS COMMUNICATION: STM
+-------------------------------
+
+!!! This will be a difficult section to write !!!
+
+*** non-trivial interaction with synchronous exceptions
+
+EVALUATION MODEL
+----------------
+
+SYNCHRONOUS EXCEPTIONS
+----------------------
+
+AYNCHRONOUS EXCEPTIONS
+----------------------
+
+Previous mechanisms describe how to do communication when processes are cooperating.  What about when they're not? (e.g. consider the interrupt mechanism of Unix.)
+
+    Message INBOX
+
+We've got to talk about NORMAL EXCEPTIONS, and this ties into the EXECUTION MODEL
+
+SPARKS AND THREADS
+------------------
+
+XXX need to know about thunks! (maybe defer this until we talk about lazy evaluation)
+
+If the run queue is empty, what should we do? Run sparks! (by creating a spark thread--batching the evaluation together; scheduleActivateSpark).  Spark thread grabs sparks from its own pool or other pools and whnf's them, but aborts if the capability gets any real work.
+
+spark pool per Capability
+
+balancing (balanceSparkpoolsCaps) using bounded work-stealing queue.  Choice of FIFO (oldest--needs to be synchronized) or LIFO (youngest). Experimentally oldest is better
+
+GC fizzling sparks: when thunk is already evaluated (use pointer tagging XXX forward reference!)
+
+MUMBLE something about other sparks to retain (GC policy)--XXX need to check what it is doing now
+
+**********
