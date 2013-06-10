@@ -5,14 +5,34 @@ programming language is the garbage collector, which is responsible
 identifying and reclaiming memory from objects which are no longer in
 use by the program.
 
-The presence of a garbage collector in a language runtime imposes
-important restrictions on many other parts of the design; additionally,
-the 
+The presence of a garbage collector imposes important restrictions on
+the design of the runtime system.  Additionally, the implementation of a
+garbage collector is greatly complicated by its performance
+considerations: the garbage collector affects the performance of all
+programs.  Fortunately, the design of the garbage collector itself has
+very few dependencies on the rest of the runtime system (the most
+interesting thing about our setting is the unusual data life cycle that
+accompanies functional programs, which we will discuss in Section~\XXX).
+
+Let us assume, then, that we are building a runtime for a programming
+language with managed memory.  What do we need?
 
 \subsection{Blocks}
+
+The very first consideration is this: ``Where is the memory coming
+from?''  The conventional design is to request a large, contiguous block
+of memory from the operating system and use it as the heap.  However,
+this scheme is fairly inflexible, especially when multiple heaps are
+necessary (as might be the case in a generational garbage collector.)
+
+Instead, GHC utilizes a \emph{block-structured heap}~\cite{Marlow:2008:PGG:1375634.1375637}.
+The basic idea is to divide the heap into fixed-size $B$-byte blocks, where $B$ is a power of two:
+blocks are then linked together in order to provide memory for the heap.
+
+\subsection{Memory layout}
 
 \subsection{Generational garbage collection}
 
 \subsection{Parallel garbage collection}
 
-
+\subsection{Summary}

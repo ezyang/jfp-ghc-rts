@@ -1,7 +1,16 @@
 \documentclass{jfp1}
-\title{The GHC Runtime System}
 
+\usepackage{color}
+
+\title{The GHC Runtime System}
 \author{fill in}
+
+\newcommand{\Red}[1]{{\color{red} #1}}
+\newcommand{\ToDo}[1]{{\color{blue} ToDo: #1}}
+\newcommand{\nb}[1]{$\lhd$ \Red{#1} $\rhd$}
+\newcommand{\tocite}[0]{{\color{red} [cite]}\xspace}
+
+\newcommand{\XXX}{\Red{XXX}}
 
 \begin{document}
 
@@ -28,5 +37,8 @@ components such as garbage collection and software transactional memory.
 \input{storage.tex}
 \input{threads.tex}
 \input{evaluation.tex}
+
+\bibliographystyle{jfp}
+\bibliography{paper}
 
 \end{document}
