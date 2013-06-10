@@ -11,6 +11,24 @@ Some big questions
 - Should exceptions be introduced before or after the execution model of
   Haskell is discussed?
 
+- Giving the high level motivation, that's an important thing to get into,
+  enough for them to understand why we did it this way.  But in order to replicate it they will probably
+  need to read the full technical details.  But if it's important to understand.
+- No need to describe in full detail what a block descriptor is.
+
+- Making a fast curry - good paper on evaluation.  So certainly we don't
+  want to go into the full details on the eval-apply.  But you need enough details.
+  Take a stack of a thread and turn it into the object of the heap, in such a way that
+  if someone demands the value later, you can reuse the computation.  So you need to explain enough about thunks,
+  layout of the stack, update frames.
+
+- Short intro to evaluation before threading; or maybe even before
+  GC--but don't talk about lazy evaluation too long!  There are some things you just can't
+  do without lazy evaluation, make some sort of argument why that would be useful.
+
+- Important to talk about what the implementation of lazy evaluation;
+  all of the stuff, e.g. async is we can only do it because we have lazy evaluation and we can suspend it on the heap.
+
 GARBAGE COLLECTOR
 -----------------
 
@@ -30,7 +48,7 @@ How do we identify pointers?  Idea: require every heap object to be boxed, and s
 
 OK, but generational garbage collection has the classic problem where old generations may point into young generation? But Haskell doesn't mutate very much, so we can do something stupid to deal with mutation: remembered sets.  (point out some of the stupid things we've done with arrays, etc in the past; need to manually add write barriers to those ops)
 
-But that's not true: Haskell laziness means that we have to update a value when it gets evaluated.  Easy: eager promotion: if old generation ends up pointing to young generation (due to a write-once), promote the new object to the old generation.  Notice: need to scavenge old generations first!
+But that's not true: Haskell laziness means that we have to update a value when it gets evaluated.  Easy: eager promotion: if old generation ends up pointing to young generation (due to a write-once), promote the new object to the old generation.  Notice: need to scavenge old generations first!  (Thunks turn up as mutable objects)
 
 OK, but we want to make it even faster.  Idea: parallel garbage collection.  How is work split up?  It is split up using the blocks.  (More details: partly free list).  Note: all of the old GC state now has to be made thread-local (some of it wasn't, for a while)  This is a good idea, and other languages should use this technique too! (Or maybe there's a reason why it doesn't work so well in other cases?)
     What about claiming objects for evacuation? (You can only do it once, see evacuation below)
@@ -60,7 +78,7 @@ GC summary:
       (going from old generation to new)
 ** what is a mark stack?
     - Detail: thunk selector evaluation, to prevent GC from holding onto
-      memory too long (defer?)
+      memory too long (defer?) ~ really interesting problem, but it would require a lot of details. I think that is going to be too much details (marlow); there are other approaches to the problem as well.  There's a language level solution which people say we should use in GHC; add a magic call construct
 
 Citation "Parallel generational-copying garbage collection with a block-structured heap"
 Citation Cheney "A nonrecursive list compacting algorithm"
@@ -124,6 +142,11 @@ Note: garbage collection requires ALL capabilities to be acquired, since we do N
 
 ** Some amount of delicacy deciding when a GC is appropriate
 
+MESSAGES
+--------
+
+Message INBOX - messages are used for MVars, for exceptions, thread migration, talk about it generally.
+
 ABI NOTES ABOUT STACKS
 ----------------------
 
@@ -172,6 +195,7 @@ FFI (if you're not interested in how to support FFI, can skip this section) ~~ t
         maybeYieldCapability
             checks if GC is happening, or
                    cap->returning_tasks_hd != NULL (task is returning from foreign call),
+                        ^--- done in a special way so that they have priority
                    or the bound case seen below...
         tso = popRunQueue
         if (tso->bound) {
@@ -196,6 +220,8 @@ FFI (if you're not interested in how to support FFI, can skip this section) ~~ t
 
 ** Also talk about stable pointer design... (it's a giant hash table)
 
+We should abstract some of these details.  Don't have to go into the details of the locks and condition variables is.
+
 INTERPROCESS COMMUNICATION: MVARS
 ---------------------------------
 
@@ -207,12 +233,16 @@ Idea: we manage the scheduling of processes ourselves.  So what if we have a sys
 
 XXX this will be pretty easy to explain, and I've looked at this closely
 
+Send a message to wakeup a thread on another capability
+
 INTERPROCESS COMMUNICATION: STM
 -------------------------------
 
 !!! This will be a difficult section to write !!!
 
 *** non-trivial interaction with synchronous exceptions
+
+Maybe this is not one of the really important topics
 
 EVALUATION MODEL
 ----------------
@@ -224,8 +254,6 @@ AYNCHRONOUS EXCEPTIONS
 ----------------------
 
 Previous mechanisms describe how to do communication when processes are cooperating.  What about when they're not? (e.g. consider the interrupt mechanism of Unix.)
-
-    Message INBOX
 
 We've got to talk about NORMAL EXCEPTIONS, and this ties into the EXECUTION MODEL
 
