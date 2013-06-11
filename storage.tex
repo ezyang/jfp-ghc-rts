@@ -26,10 +26,78 @@ this scheme is fairly inflexible, especially when multiple heaps are
 necessary (as might be the case in a generational garbage collector.)
 
 Instead, GHC utilizes a \emph{block-structured heap}~\cite{Marlow:2008:PGG:1375634.1375637}.
-The basic idea is to divide the heap into fixed-size $B$-byte blocks, where $B$ is a power of two:
-blocks are then linked together in order to provide memory for the heap.
+The basic idea is to divide the heap into fixed-size $B$-byte blocks,
+where $B$ is a power of two: blocks are then linked together in order to
+provide memory for the heap.  GHC uses 4kb blocks, but this is an easily
+adjustable constant.  With blocks, we can allocate and dynamically
+resize regions of memory at will.  There are some other benefits as well:
+
+\begin{enumerate}
+    \item Large objects (e.g. close to block size) do not have to be copied from one region to
+        another; instead, the block they reside in can be relinked from
+        one region to another.\footnote{Of course, this requires \emph{only}
+        one object to live in a block, which can result in fragmentation.
+        However, empirically this does not seem to have caused much of a problem.}
+    \item Blocks make it easy to provide heap memory in contexts where it is
+        not possible to perform garbage collection.  The primary example of this
+        in GHC is the GMP arbitrary-precision arithmetic library, which requires
+        the ability to allocate memory for its internal computation.  If the heap
+        was contiguous, we would be left with no recourse if the heap ran out
+        of memory while GMP code was executing, since there is no way to resize
+        the heap without simultaneously executing a garbage collection, and
+        precise garbage collection cannot be performed safely while running C code.
+    \item Free memory can be recycled quickly, since a free block can be quickly
+        used somewhere else.
+\end{enumerate}
+
+One reason why this scheme works so well is that most objects on the
+heap are much smaller than the block size; handling these cases is very
+simple.  When an object is larger than a block size, it needs to be
+placed into a \emph{block group} of contiguous blocks---which in turn
+need to be handled with some care to avoid fragmentation.  The blocks
+themselves are provided by the operating system in units called
+\emph{megablocks}, which in the current implementation are 1Mb in size.
+
+Finally, each block has associated with a \emph{block descriptor}, which
+contains information about the block such as what generation it belongs to, how full it is, what block
+group it is part of, etc.  An obvious place to put the block descriptor
+is at the beginning of a block, but this runs into problems when the block
+is the member of a block group (the memory must be contiguous!)
+Thus, the descriptors of blocks of a megablock are instead organized together
+in the first block of a megablock; some care is taken to ensure that the
+runtime can efficiently compute the block descriptor of any given block---an
+interested reader can find the details at \verb|http://hackage.haskell.org/trac/ghc/wiki/Commentary/Rts/Storage/BlockAlloc|
+\XXX
 
 \subsection{Memory layout}
+
+The next classic problem a garbage collector encounters is the question:
+``What is a pointer?''  The garbage collector must be able to answer
+this question in order to follow the pointers and get an accurate
+picture of what memory is in use.  The classic solution to this problem
+is to require data on the heap to be \emph{boxed}: every object has
+a header which says what type of object it is and what the pointer fields
+in the object are.
+
+GHC adopts this design choice:  every object has a \emph{header} which
+points to an \emph{info table}.  The info table indicates what the type of
+the object is and what the pointer fields of the object are.  GHC supports
+two types of layout: one where the payload consists of zero or more pointers
+followed by zero or more non-pointers (pointers-first), and another where
+pointers are described by a bitmap.
+
+\Red{This bit is a mess}
+
+Unusually, the info table also contains \emph{code} for the object: any
+object can be ``entered'' in order to evaluate it.  This may seem
+wasteful for a data constructor, which has no evaluation to do (and
+simply returns immediately).  However, for Haskell, which features
+lazy evaluation, allowing all objects to be evaluatable makes a good
+deal of sense: there is now no longer any need to make a memory dereference
+to find out whether or not some data is a thunk or a data constructor: just jump
+to it. \Red{But see pointer tagging.}
+
+\verb|http://hackage.haskell.org/trac/ghc/wiki/Commentary/Rts/Storage/HeapObjects|
 
 \subsection{Generational garbage collection}
 

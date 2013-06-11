@@ -273,3 +273,46 @@ GC fizzling sparks: when thunk is already evaluated (use pointer tagging XXX for
 MUMBLE something about other sparks to retain (GC policy)--XXX need to check what it is doing now
 
 **********
+
+LAZY EVALUATION
+---------------------
+
+STG paper
+    Explore design space: How are function values, data values and unevaluated expressions represented? how is function application performed? How is case analysis performed on data structures?
+    hnfs (functions and constructors) and thunks: all called 'closures'
+        Cheap indirections available (eliminated by GC)
+        Black holes, concurrency handled exceptionally
+        Can avoid heap allocation
+    data
+        function - code + free variables
+        thunks - could be parameterless function value, but should physically update with new value.  Cell model has each closure with status flags; self-updating has code for a thunk which handles the update. if value takes up more space need to replace with indirection.  black holes to check infinite loops and wasted work.
+        PAPs (partial application)
+    OLD functions - old scheme was push/enter, breaking activation frames
+        eval/apply: caller knows what the arguments are, looks at function closure, finds arity, makes exact call
+            lots and lots of call continuations
+    OLD data types - uniform across "built ins" and user-defined, vectored returns
+unboxed values
+operational intuition: code/stack/heap
+
+header/payload; executable code, type, layout info, type info
+stack frame thougth as a stack-allocated function closure
+
+Spineless Tagless G-Machine, except with eval/apply and dynamic pointer tagging
+
+tagging - get the branch predictor less terrible
+    claims that it's OK to have tag pointer be zero, but THIS IS NOT TRUE http://hackage.haskell.org/trac/ghc/wiki/Commentary/Rts/HaskellExecution/PointerTagging
+    initialising/using/clearing/propagating
+    this IS implemented for functions (showing arity)
+    note: NOT the GC tag bigs
+
+Concurrency:
+    run queues are now now per capability/same with remembered set
+    thunks are a big problem
+    usual: enter, push update frame, pop to update frame
+    bad idea: locking thunks. so go lock free
+    result word to make sure indirection rewrite will not clobber fvs; memory fence to ensure indirection is seen properly
+    expensive duplicate work: deal with black holing, by periodically scanning the stack and CASing; truncate stack if someone else had blackholed it; need to mark update frames (lazy blackholing)
+    OUT OF DATE PAPER: per TSO black hole queues, a little delicate
+    freezing state of execution
+    greyholing
+    some funny STM stuff
