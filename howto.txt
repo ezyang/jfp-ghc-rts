@@ -316,3 +316,22 @@ Concurrency:
     freezing state of execution
     greyholing
     some funny STM stuff
+
+----
+
+Operationally, in the STG-machine implementation in GHC, the
+case expression is compiled to code that enters the variable being
+scrutinised, after pushing on the stack a return address, or contin-
+uation, for the alternatives. All heap objects have the uniform rep-
+resentation shown in Figure 1. The first word of every object is an
+info pointer, which points both to the entry code for the object, and
+to the preceding info table for the object. The info table describes
+
+Data Write Misses
+    Sequential heap writes: there is no need to read the memory block into D1 cache upon a write miss, because it will soon be overwritten.  You can do this with a write-allocate cache with sub-block placement, but this is not frequent; or could use write-invalidate instruction (x86 does not have this, but ARM does!)
+    Alternative is prefetch: fetch ahead 64 bytes in GC; this should help 22%
+Data read miss
+    Code next to data pollutes data cache with instructions (TABLES_NEXT_TO_CODE=off; but now there's another indirection!)
+    info tables are frequently accessed; maybe layout can be improved
+    Idea: apply BIBOP to make a heap where all objects are one type of object
+        >>> USE THIS TRICK FOR PROFILING!!!!

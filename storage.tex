@@ -69,7 +69,6 @@ runtime can efficiently compute the block descriptor of any given block---an
 interested reader can find the details at \verb|http://hackage.haskell.org/trac/ghc/wiki/Commentary/Rts/Storage/BlockAlloc|
 \XXX
 
-\subsection{Memory layout}
 
 The next classic problem a garbage collector encounters is the question:
 ``What is a pointer?''  The garbage collector must be able to answer
@@ -78,26 +77,6 @@ picture of what memory is in use.  The classic solution to this problem
 is to require data on the heap to be \emph{boxed}: every object has
 a header which says what type of object it is and what the pointer fields
 in the object are.
-
-GHC adopts this design choice:  every object has a \emph{header} which
-points to an \emph{info table}.  The info table indicates what the type of
-the object is and what the pointer fields of the object are.  GHC supports
-two types of layout: one where the payload consists of zero or more pointers
-followed by zero or more non-pointers (pointers-first), and another where
-pointers are described by a bitmap.
-
-\Red{This bit is a mess}
-
-Unusually, the info table also contains \emph{code} for the object: any
-object can be ``entered'' in order to evaluate it.  This may seem
-wasteful for a data constructor, which has no evaluation to do (and
-simply returns immediately).  However, for Haskell, which features
-lazy evaluation, allowing all objects to be evaluatable makes a good
-deal of sense: there is now no longer any need to make a memory dereference
-to find out whether or not some data is a thunk or a data constructor: just jump
-to it. \Red{But see pointer tagging.}
-
-\verb|http://hackage.haskell.org/trac/ghc/wiki/Commentary/Rts/Storage/HeapObjects|
 
 \subsection{Generational garbage collection}
 
