@@ -94,7 +94,11 @@ immediately promote data, since objects may not have had sufficient
 chance to die by the time of the first GC.  Thus, GHC further implements
 an \emph{aging} scheme, where reachable objects in generation 0 are not
 immediately promoted to generation 1; instead, they are aged and
-promoted the next GC cycle.
+promoted the next GC cycle.\footnote{When objects are only aged once, an
+equivalent way of stating this scheme is that generation 0 is split into
+two generations, but we never garbage collect just the younger
+generation, we always collect both on a minor collection.  This is in fact
+how GHC implements aging.}
 
 Use of a copying collector has other benefits for allocation heavy
 workloads.  In particular, copying collection ensures that free memory
