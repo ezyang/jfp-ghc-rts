@@ -3,15 +3,12 @@
 An essential component of a runtime system for any high-level
 programming language is the garbage collector, which is responsible
 identifying and reclaiming memory from objects which are no longer in
-use by the program.
-The presence of a garbage collector imposes important restrictions on
-the design of the runtime system.  Additionally, the implementation of a
-garbage collector is greatly complicated by its performance
-considerations: the garbage collector affects the performance of all
-programs.
-
-Let us assume, then, that we are building a runtime for a programming
-language with \emph{managed memory}.  What do we need?
+use by the program.  When it comes to a garbage collector,
+\emph{efficiency} is the order of the day: the speed of the garbage
+collector affects the performance of all programs running on the
+runtime, and thus the GHC runtime devotes a substantial portion of its
+complexity budget to a fast garbage collector.  What do we need for
+a fast garbage collector?
 
 \subsection{Blocks}
 
@@ -25,7 +22,7 @@ runs out of memory, we need to double the size of the heap and copy all of the
 old data into the new memory.  Picking the initial sizes of heaps can be an exercise
 in fiddling with black magic tuning parameters.
 
-A more flexible scheme is a \emph{block-structured heap}~\cite{Marlow:2008:PGG:1375634.1375637}.
+A more flexible scheme is a \emph{block-structured heap}~\cite{maclisp,Dybvig94don'tstop,Marlow:2008:PGG:1375634.1375637}.
 The basic idea is to divide the heap into fixed-size $B$-byte blocks,
 where $B$ is a power of two: blocks are then linked together in order to
 provide memory for the heap.\footnote{GHC uses 4kb blocks, but this is an easily
@@ -59,8 +56,8 @@ heap are much smaller than the block size; handling these cases is very
 simple.  When an object is larger than a block size, it needs to be
 placed into a \emph{block group} of contiguous blocks---which in turn
 need to be handled with some care to avoid fragmentation.  The blocks
-themselves are provided by the operating system in units called
-\emph{megablocks}, which in the current implementation are 1Mb in size.
+themselves are provided by the operating system in large units called
+\emph{megablocks}.\footnote{1Mb in size, in the current implementation.}
 
 Finally, each block has associated with a \emph{block descriptor}, which
 contains information about the block such as what generation it belongs to, how full it is, what block
@@ -82,7 +79,9 @@ the youngest.  Objects are allocated into the youngest generation, which
 has garbage collection performed on it whenever it runs out of memory.
 Surviving objects are \emph{promoted} to the next generation, which is
 collected less frequently, and so forth.  In a \emph{copying collector}, this
-promotion occurs by simply copying the object into the \emph{to-space}.
+promotion occurs by simply copying the object into the \emph{to-space},
+a process called \emph{evacuation}.  Evacuated objects are subsequently
+\emph{scavenged} to find what objects they refer to, so they can be evacuated as well.
 
 The efficacy of generational collection hinges on the ``generational
 hypothesis'', which states that data that has been recently allocated is
@@ -108,7 +107,7 @@ simply involves bumping up the free space pointer. Additionally, while
 copying collectors are often criticized for wasting half of their
 allocated memory to maintain the two spaces for copying, a block
 structured heap can immediately reuse blocks in the from-space as soon
-as they are fully evacuated. \Red{terminology evacuated}
+as they are fully evacuated.
 
 \subsubsection{Mutability in the GC}
 
@@ -176,7 +175,7 @@ there is still the question, ``Is it fast enough?''  The process of
 traversing the heap is an inherently parallel process, and thus one
 avenue for speeding up the garbage collector when multiple cores are
 available are to perform parallel garbage collection.  GHC implements
-such a scheme~\XXX{}, and \emph{parallel collection} is the primary source of
+such a scheme~\cite{Marlow:2008:PGG:1375634.1375637}, and \emph{parallel collection} is the primary source of
 complexity in top-level loop of the garbage collector.  (Note that this
 is distinct from \emph{concurrent collection}, where the GC runs concurrently
 with user code which is mutating values on the heap.)
@@ -196,7 +195,7 @@ blocks can be statically assigned to GC threads with no runtime load
 balancing, blocks can be taken from a global queue which provides blocks
 to all threads, or a hybrid solution can have threads have local queues,
 but permit other threads to steal work from other queues when they are
-idle via a \emph{work-stealing queue structure}.~\XXX{}  GHC originally
+idle via a \emph{work-stealing queue structure}.~\cite{Arora:1998:TSM:277651.277678}  GHC originally
 implemented a single global queue, but we have since switched work-stealing queues
 because they have much better data locality, as processors prefer to take
 work from their local queues before stealing work from others.
@@ -282,9 +281,9 @@ garbage collector, there remain many other features we have not
 discussed here.  These include:
 
 \begin{itemize}
-    \item an implementation of a compacting collector,~\XXX{}
-    \item support for weak pointers and finalizers,~\XXX{} \Red{We might actually want to talk about this, it is probably one of the more voodoo-y parts of the system} and
-    \item garbage collection of static objects.~\XXX{}
+    \item an implementation of a compacting collector, \Red{no docs about this!}
+    \item support for weak pointers and finalizers,~\cite{PeytonJones:1999:SSM:647978.743369} \Red{We might actually want to talk about this, it is probably one of the more voodoo-y parts of the system} and
+    \item garbage collection of static objects.
 \end{itemize}
 
 We have also omitted many details about the features we have discussed.
@@ -292,7 +291,7 @@ For a good account of the block-structured parallel garbage collector,
 please see~\cite{Marlow:2008:PGG:1375634.1375637}; however, since the
 paper was published the default locking and load balancing schemes for
 the parallel GC have changed, and we have implemented the improvement
-described in Section 7.1.  Additionally, the GHC Commentary has good
+described in Section 7.1.  Additionally, the GHC Commentary~\cite{ghc-gc-commentary} has good
 articles for technically inclined GHC hackers on a variety of issues we
-have discussed here, including eager promotion~\XXX{}, remembered
-sets~\XXX{} \Red{ete etc}
+have discussed here, including eager promotion, remembered
+sets \Red{ete etc}
