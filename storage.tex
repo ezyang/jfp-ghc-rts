@@ -23,7 +23,7 @@ necessary.
 
 Instead, GHC utilizes a \emph{block-structured heap}~\cite{Marlow:2008:PGG:1375634.1375637}.
 The basic idea is to divide the heap into fixed-size $B$-byte blocks,
-where $B$ is a power of two: blocks are then linked together in order to
+where $B$ is a power of two: possibly non-contiguous blocks are then linked together in order to
 provide memory for the heap.  GHC uses 4kb blocks, but this is an easily
 adjustable constant.  With blocks, we can allocate and dynamically
 resize regions of memory at will.  There are some other benefits as well:
