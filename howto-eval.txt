@@ -1,0 +1,101 @@
+EVALUATION MODEL
+----------------
+
+LAZY EVALUATION
+---------------------
+
+STG paper
+    Explore design space: How are function values, data values and unevaluated expressions represented? how is function application performed? How is case analysis performed on data structures?
+    hnfs (functions and constructors) and thunks: all called 'closures'
+        Cheap indirections available (eliminated by GC)
+        Black holes, concurrency handled exceptionally
+        Can avoid heap allocation
+    data
+        function - code + free variables
+        thunks - could be parameterless function value, but should physically update with new value.  Cell model has each closure with status flags; self-updating has code for a thunk which handles the update. if value takes up more space need to replace with indirection.  black holes to check infinite loops and wasted work.
+        PAPs (partial application)
+    OLD functions - old scheme was push/enter, breaking activation frames
+        eval/apply: caller knows what the arguments are, looks at function closure, finds arity, makes exact call
+            lots and lots of call continuations
+    OLD data types - uniform across "built ins" and user-defined, vectored returns
+unboxed values
+operational intuition: code/stack/heap
+
+header/payload; executable code, type, layout info, type info
+stack frame thougth as a stack-allocated function closure
+
+Spineless Tagless G-Machine, except with eval/apply and dynamic pointer tagging
+
+tagging - get the branch predictor less terrible
+    claims that it's OK to have tag pointer be zero, but THIS IS NOT TRUE http://hackage.haskell.org/trac/ghc/wiki/Commentary/Rts/HaskellExecution/PointerTagging
+    initialising/using/clearing/propagating
+    this IS implemented for functions (showing arity)
+    note: NOT the GC tag bigs
+
+We've talked about how to allocate data. What does the runtime need to
+support operating on this data?  At the very least, need to know about
+the execution context to do GC properly (with concurrency, need to know more.)
+
+What is an execution context?  Primarily, it is a STACK.  We need a way to
+let the GC know what values on the stack are pointers and what are not.  So
+reuse the info table layout!  (*** some nonsense about SRTs)  Stack frames/activation
+records are also objects.
+    Detail: "stack stubbing" mark live variables dead by replacing new stack frame
+    requires bitmap layout
+
+Sometimes, we will need to temporarily suspend execution to run a
+garbage collection.  Constraint on code generation: there need to be
+safe points to run the GC (otherwise you might accidentally be in the
+middle of constructing a stack frame when you serviced an interrupt to
+GC).  Easy thing to do: check on HEAP ALLOCATION.
+
+
+q.
+    Operationally, in the STG-machine implementation in GHC, the
+    case expression is compiled to code that enters the variable being
+    scrutinised, after pushing on the stack a return address, or contin-
+    uation, for the alternatives. All heap objects have the uniform rep-
+    resentation shown in Figure 1. The first word of every object is an
+    info pointer, which points both to the entry code for the object, and
+    to the preceding info table for the object. The info table describes
+
+
+SYNCHRONOUS EXCEPTIONS
+----------------------
+
+Data Write Misses
+    Sequential heap writes: there is no need to read the memory block into D1 cache upon a write miss, because it will soon be overwritten.  You can do this with a write-allocate cache with sub-block placement, but this is not frequent; or could use write-invalidate instruction (x86 does not have this, but ARM does!)
+    Alternative is prefetch: fetch ahead 64 bytes in GC; this should help 22%
+Data read miss
+    Code next to data pollutes data cache with instructions (TABLES_NEXT_TO_CODE=off; but now there's another indirection!)
+    info tables are frequently accessed; maybe layout can be improved
+    Idea: apply BIBOP to make a heap where all objects are one type of object
+        >>> USE THIS TRICK FOR PROFILING!!!!
+
+ABI NOTES ABOUT STACKS
+----------------------
+
+C stack is used for temporary data
+Haskell stack is NOT used for temporary data
+
+Every entry on the Haskell stack has an info table, just like heap objects.  These info tables point to code, which is how "return works". (As it turns out, heap objects also get code, but that has to do with laziness!)  So the stack is unsuitable for storing data temporarily, e.g. when you've run out of registers.
+
+    - put stack onto the heap (reifying control for resumability)
+    - stack frames do not necessarily correspond directly to structure
+      of code.  Lots of Haskell code will push multiple stack frames.  So they are a bunch of continuations!
+
+Since data on the C stack could point to the heap, when we hit a GC all of that data needs to be pushed into an info table.  So clearly a GC cannot happen "just anywhere."  Thus, GC's can only occur at the *starts* of functions (e.g. when we are doing the heap check)
+
+Returning on the stack is single return
+
+Info tables are a nice intensional structure, so there are some "wired-in" info tables which the runtime system handles manually. Examples:
+
+    - stg_upd_frame (and variants)
+    - stg_stack_underflow_frame (UNDERFLOW_FRAME) ~~ also notice with stack chunks have to
+      copy data and deal with running out of info on a chunk; also stg_stop_thread (STOP_FRAME)
+    - CATCH_FRAME
+    - ATOMICALLY_FRAME
+    - CATCH_STM_FRAME
+    - CATCH_RETRY_FRAME
+
+Like most other stack based languages, we walk up the stack when making non-local jumps of control

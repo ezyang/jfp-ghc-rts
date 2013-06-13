@@ -1,0 +1,118 @@
+GARBAGE COLLECTOR
+-----------------
+
+- No need to describe in full detail what a block descriptor is.
+
+Well, Haskell is a managed memory language.  So you decide that you need to build a garbage collector.
+
+Your first idea is to do generational garbage collection, because that's what everyone does, most garbage dies young.  This is true in most languages, but this is especially true in functional programming languages, where programs allocate a lot of memory. They allocate so much, that objects should not be promoted eagerly; they should be aged.
+
+Where is the memory coming from?  Stupid thing is to just allocate a big honking block, but that's annoying.  Idea: heap is not a contiguous piece of memory, but a bunch of chained together blocks.  (Knock on effect: large objects can be pinned to blocks BF_LARGE. But watch out for fragmentation.)  (some details about how it works, esp. megablocks and interaction with OS memory allocator, and dealing with the free lists)
+    Citation: DEB94 "Don't stop the BIBOP"
+              Ste77 "Data representations in PDP-10 MacLISP"
+
+How do we identify pointers?  Idea: require every heap object to be boxed, and store an info table saying what the pointers are.  Note: what is all of the # nonsense about? Well, if a value is unboxed, operations on it are really fast, but it can never hit the heap.
+    So we need to talk a little bit about closure representation. At this point, if we just have some nondescript closure this is reasonable
+    Pointers-first versus bitmap
+    Need to talk about the stack, and temporary values in memory!
+        JVM, CLR use a different technique, where they define the stack layout at *EVERY POINT IN THE BYTECODE*
+
+OK, but generational garbage collection has the classic problem where old generations may point into young generation? But Haskell doesn't mutate very much, so we can do something stupid to deal with mutation: remembered sets.  (point out some of the stupid things we've done with arrays, etc in the past; need to manually add write barriers to those ops)
+
+But that's not true: Haskell laziness means that we have to update a value when it gets evaluated.  Easy: eager promotion: if old generation ends up pointing to young generation (due to a write-once), promote the new object to the old generation.  Notice: need to scavenge old generations first!  (Thunks turn up as mutable objects)
+
+OK, but we want to make it even faster.  Idea: parallel garbage collection.  How is work split up?  It is split up using the blocks.  (More details: partly free list).  Note: all of the old GC state now has to be made thread-local (some of it wasn't, for a while)  This is a good idea, and other languages should use this technique too! (Or maybe there's a reason why it doesn't work so well in other cases?)
+    What about claiming objects for evacuation? (You can only do it once, see evacuation below)
+    Termination criterion FDSZ01 (check for zero running threads)
+    Citation FDSZ01
+             ABCS01
+
+What are the roots?  Intuitively, whatever is "executing" on the heap is the roots. But we haven't talked about what executes in Haskell yet: more soon!
+
+Note: empirically, evacuate() is the most important function for the performance of GC. "Now you know!"
+
+GC summary:
+    - Block(start, free, link, gc metadata)
+    - Nursery is a bunch of blocks
+    - A generation is a bunch of blocks + large objects (synchronized) + threads(?);
+      linked to a "to generation"
+    - gcthread unit of parallel collection, containing thread-local data;
+      per generation (the workspace) has todo blocks and a scavenged list, also the
+      part list optimization ** what's the overflow thing for?
+    - Collection: collects all gens up to some point; does an evacuate
+      and scavenge
+**  Cheney's algorithm
+    - Evacuation: figure out what block it's going into, and then copy
+      the object there; note, can only do this ONCE, so if it needs to happen
+      twice gotta put it in remembered set
+    - Scavenge: looks at all the pointers and evacuates their contents
+      (going from old generation to new)
+** what is a mark stack? ~> compacting GC only
+    - Detail: thunk selector evaluation, to prevent GC from holding onto
+      memory too long (defer?) ~ really interesting problem, but it would require a lot of details. I think that is going to be too much details (marlow); there are other approaches to the problem as well.  There's a language level solution which people say we should use in GHC; add a magic call construct
+
+GarbageCollect(collect_gen, cap)
+    take out storage manager lock
+    initialize gct (gc thread data) for this thread
+    start_gc_threads --> set gc_running_threads = 0 ### I think the comment here is misleading
+    don't parallelize unless it's a major GC
+    initialize generations/steps which are being collected
+        throw away mutable list (not necessary, you see?)
+        deprecate existing blocks in generation (i.e. put them in from-space)
+        grab partial blocks from gc_thread workspace and put them in from-space
+    initialize generations/steps which are not being collected
+        stash the mutable list
+    initialize gc threads
+    gc_running_threads++
+    wakeup threads
+    scavenge stuff (no moving): capability mutable lists
+    mark stuff (i.e. evacuate it): capabilities / CAFs / scheduler / weak pointer list / stable tables
+    in a loop: scavenge until all done ***
+    shut down gc threads
+    collected generations: free from-space and make to-space from-space (same with large objects)
+    uncollected generations: append promoted large objects
+    reset nursery
+    run finalizers
+    resurrect threads
+    give up excess memory back to operating system
+
+^-- simplified
+    throw out mutable lists for all generations being collected and move their blocks to from-space
+    wakeup gc threads (setting gc_running_threads > 0)
+    evacuate the roots (if there are multiple capabilities, assign those to the corresponding GC thread; otherwise only one GC thread gets everything to start off)
+    scavenge until done
+    formalities: run finalizers, resurrect threads, return memory to OS
+
+*** don't talk about sharing partial blocks
+
+scavenge_until_all_done()
+    scavenge_loop(): repeatedly call scavenge_find_work()
+        try to do local work (todo block)
+        try to steal work (from todo_q)
+    collect completed blocks and add them to gen (taking out spinlock)
+    spin looking either for work or for completion (num threads = 0)
+        looking for work checks the work stealing queue (also todo_overflow; it's the "one buffer" before things hit the queue)
+
+scavenge # Cheney's algorithm invariant says that there is no SLOP so we can just walk down it
+    loop, case split on pointer type
+        evacuate the pointer fields, temporarily switching off eager promotion if object is mutable
+        if evacuation fails for mutable object, mark as dirty and force it onto the mutable list
+    push the block into "finished" if it's not todo (i.e. the to-space), checking if it's still got stuff left
+
+evacuate
+    check if is heap allocated
+    check if it was already evacuated
+    check if it's an indirection (either it is evacuated enough, or this counts as a fail)
+    case split on type, and do a copy
+        use a cas when replacing with forwarding pointer on certain objects, but not all
+        e.g. thunks need locking, constructors don't
+        If you get clobbered, just re-evacuate (your copy is dead, but it will get GC'd next round)
+
+(partly free nonsense)
+
+Citation "Parallel generational-copying garbage collection with a block-structured heap"
+Citation Cheney "A nonrecursive list compacting algorithm"
+
+** defer pinned objects
+** defer CAFs
+** defer static objects (HEAP_ALLOCED)
