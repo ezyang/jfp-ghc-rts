@@ -2,6 +2,11 @@ HOW TO BUILD A GHC RUNTIME SYSTEM
 
 You're building a runtime for Haskell. Where are you going to start?!
 
+More questions
+-------------
+
+- Did we switch to "copy first then cas" for evacuate?
+
 Some big questions
 ------------------
 
@@ -79,6 +84,65 @@ GC summary:
 ** what is a mark stack?
     - Detail: thunk selector evaluation, to prevent GC from holding onto
       memory too long (defer?) ~ really interesting problem, but it would require a lot of details. I think that is going to be too much details (marlow); there are other approaches to the problem as well.  There's a language level solution which people say we should use in GHC; add a magic call construct
+
+GarbageCollect(collect_gen, cap)
+    take out storage manager lock
+    initialize gct (gc thread data) for this thread
+    start_gc_threads --> set gc_running_threads = 0 ### I think the comment here is misleading
+    don't parallelize unless it's a major GC
+    initialize generations/steps which are being collected
+        throw away mutable list (not necessary, you see?)
+        deprecate existing blocks in generation (i.e. put them in from-space)
+        grab partial blocks from gc_thread workspace and put them in from-space
+    initialize generations/steps which are not being collected
+        stash the mutable list
+    initialize gc threads
+    gc_running_threads++
+    wakeup threads
+    scavenge stuff (no moving): capability mutable lists
+    mark stuff (i.e. evacuate it): capabilities / CAFs / scheduler / weak pointer list / stable tables
+    in a loop: scavenge until all done ***
+    shut down gc threads
+    collected generations: free from-space and make to-space from-space (same with large objects)
+    uncollected generations: append promoted large objects
+    reset nursery
+    run finalizers
+    resurrect threads
+    give up excess memory back to operating system
+
+^-- simplified
+    throw out mutable lists for all generations being collected and move their blocks to from-space
+    wakeup gc threads (setting gc_running_threads > 0)
+    evacuate the roots (if there are multiple capabilities, assign those to the corresponding GC thread; otherwise only one GC thread gets everything to start off)
+    scavenge until done
+    formalities: run finalizers, resurrect threads, return memory to OS
+
+*** don't talk about sharing partial blocks
+
+scavenge_until_all_done()
+    scavenge_loop(): repeatedly call scavenge_find_work()
+        try to do local work (todo block)
+        try to steal work (from todo_q)
+    collect completed blocks and add them to gen (taking out spinlock)
+    spin looking either for work or for completion (num threads = 0)
+        looking for work checks the work stealing queue (also todo_overflow; it's the "one buffer" before things hit the queue)
+
+scavenge # Cheney's algorithm invariant says that there is no SLOP so we can just walk down it
+    loop, case split on pointer type
+        evacuate the pointer fields, temporarily switching off eager promotion if object is mutable
+        if evacuation fails for mutable object, mark as dirty and force it onto the mutable list
+    push the block into "finished" if it's not todo (i.e. the to-space), checking if it's still got stuff left
+
+evacuate
+    check if is heap allocated
+    check if it was already evacuated
+    check if it's an indirection (either it is evacuated enough, or this counts as a fail)
+    case split on type, and do a copy
+        use a cas when replacing with forwarding pointer on certain objects, but not all
+        e.g. thunks need locking, constructors don't
+        If you get clobbered, just re-evacuate (your copy is dead, but it will get GC'd next round)
+
+(partly free nonsense)
 
 Citation "Parallel generational-copying garbage collection with a block-structured heap"
 Citation Cheney "A nonrecursive list compacting algorithm"

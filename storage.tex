@@ -4,18 +4,14 @@ An essential component of a runtime system for any high-level
 programming language is the garbage collector, which is responsible
 identifying and reclaiming memory from objects which are no longer in
 use by the program.
-
 The presence of a garbage collector imposes important restrictions on
 the design of the runtime system.  Additionally, the implementation of a
 garbage collector is greatly complicated by its performance
 considerations: the garbage collector affects the performance of all
-programs.  Fortunately, the design of the garbage collector itself has
-very few dependencies on the rest of the runtime system (the most
-interesting thing about our setting is the unusual data life cycle that
-accompanies functional programs, which we will discuss in Section~\XXX).
+programs.
 
 Let us assume, then, that we are building a runtime for a programming
-language with managed memory.  What do we need?
+language with \emph{managed memory}.  What do we need?
 
 \subsection{Blocks}
 
@@ -23,7 +19,7 @@ The very first consideration is this: ``Where is the memory coming
 from?''  The conventional design is to request a large, contiguous block
 of memory from the operating system and use it as the heap.  However,
 this scheme is fairly inflexible, especially when multiple heaps are
-necessary (as might be the case in a generational garbage collector.)
+necessary.
 
 Instead, GHC utilizes a \emph{block-structured heap}~\cite{Marlow:2008:PGG:1375634.1375637}.
 The basic idea is to divide the heap into fixed-size $B$-byte blocks,
@@ -65,21 +61,226 @@ is at the beginning of a block, but this runs into problems when the block
 is the member of a block group (the memory must be contiguous!)
 Thus, the descriptors of blocks of a megablock are instead organized together
 in the first block of a megablock; some care is taken to ensure that the
-runtime can efficiently compute the block descriptor of any given block---an
-interested reader can find the details at \verb|http://hackage.haskell.org/trac/ghc/wiki/Commentary/Rts/Storage/BlockAlloc|
-\XXX
-
-
-The next classic problem a garbage collector encounters is the question:
-``What is a pointer?''  The garbage collector must be able to answer
-this question in order to follow the pointers and get an accurate
-picture of what memory is in use.  The classic solution to this problem
-is to require data on the heap to be \emph{boxed}: every object has
-a header which says what type of object it is and what the pointer fields
-in the object are.
+runtime can efficiently compute the block descriptor of any given block.
 
 \subsection{Generational garbage collection}
 
+The next question you might ask is, ``What kind of garbage collector
+should I use?''  By default, GHC uses a generational copying collector.
+
+A \emph{generational collector} divides the heap into
+\emph{generations}, where generations are numbered with the zero being
+the youngest.  Objects are allocated into the youngest generation, which
+has garbage collection performed on it whenever it runs out of memory.
+Surviving objects are \emph{promoted} to the next generation, which is
+collected less frequently, and so forth.  In a \emph{copying collector}, this
+promotion occurs by simply copying the object into the \emph{to-space}.
+
+The efficacy of generational collection hinges on the ``generational
+hypothesis'', which states that data that has been recently allocated is
+the most likely to die and become unreachable.  This is extremely true
+for functional programs, which are encouraged to use short-lived
+intermediate data structures to help structure computation.  In fact,
+functional programs allocate so much memory that it makes sense not to
+immediately promote data, since objects may not have had sufficient
+chance to die by the time of the first GC.  Thus, GHC further implements
+an \emph{aging} scheme, where reachable objects in generation 0 are not
+immediately promoted to generation 1; instead, they are aged and
+promoted the next GC cycle.
+
+Use of a copying collector has other benefits for allocation heavy
+workloads.  In particular, copying collection ensures that free memory
+is contiguous, which allows for extremely efficient memory allocation
+using a \emph{bump allocator}---so named because a heap allocation
+simply involves bumping up the free space pointer. Additionally, while
+copying collectors are often criticized for wasting half of their
+allocated memory to maintain the two spaces for copying, a block
+structured heap can immediately reuse blocks in the from-space as soon
+as they are fully evacuated. \Red{terminology evacuated}
+
+\subsubsection{Mutability in the GC}
+
+The primary complication when implementing a generational garbage
+collector is the treatment of mutable references.  When a heap is
+immutable, pointers in the young generation can only ever point into
+older generations; thus, to discover all reachable objects when
+collecting an old generation, it suffices to simply collect all younger
+generations when performing an (infrequent) collection of an older
+generation.  However, if objects in the old generation are mutable, they
+may point back into the young generation, in which case we need to know
+that those objects are reachable even when the only references to them
+are in the old generation (which we would like to avoid collecting).
+
+The solution to this problem is to apply a \emph{GC write barrier}
+(sometimes confusingly referred to as a \emph{write barrier}) to memory
+writes, adding the mutated object to a \emph{remembered set} which is
+also considered a root for garbage collection.  Now the GC cannot
+accidentally conclude an object pointed to by a mutable reference in an
+old generation is dead: it will discover its reachability through the
+remembered set.  However, this scheme is costly in two ways: first, all
+mutation must pay the overhead of adding the object to the remembered
+set, and second, as the remembered set increases in size, the amount of
+heap that must be traversed during a minor collection also increases.
+
+In the first case, GHC keeps track of mutation per object, spending a
+single memory write to add a mutated object to a mutable list.  This
+design lies in a continuum of precision: one could increase the
+precision of the remembered set by only adding mutable fields (rather
+than objects), or one could decrease the precision by only tracking
+\emph{cards} (i.e. portions of the heap) at a larger granularity.
+Increased precision increases the overhead of the mutable list but
+reduces the amount of extra work the GC needs to perform, while reduced
+precision makes mutation more efficient but leads to slower minor
+collections.  We think that mutation per object is a good balance: mutation
+is not prevalant enough in functional code that coarse-grained card making
+buys much, and most mutable objects in Haskell are quite small, with only
+one or two fields.\footnote{However, this assumption has caused the GHC runtime
+some grief, e.g. in the case of mutable arrays of pointers, which we used to
+scan the entirety.  Today, we have a card-marking scheme to permit mutable
+arrays to be efficiently GC'd.}
+
+In the second case, GHC can take advantage of an interesting property of
+lazy functional programs: thunks are only ever mutated once, in order to
+update them with their fully evaluated values---they are immutable
+afterwards.  Thus, we can immediately eliminate an updated thunk from
+the mutable list by \emph{eagerly promoting} the data the updated thunk
+points to into the same generation as the thunk itself.  Since the thunk
+is immutable, this data is guaranteed not to be GCed until the thunk
+itself is GC'd as well.  This leads to an interesting constraint on how
+garbage collection proceeds: we must collect older generations first, so
+that objects we may want to promote have not been evacuated yet.
+Because an already evacuated object may have forwarding pointers
+pointing to it, it cannot be evacuated again within the same GC.
+
+%   This procedure is divided into two steps: \emph{evacuation},
+%   which performs the copy, replacing the old object with a forwarding
+%   pointer to the new object, and \emph{scavenging}, which scans all
+%   objects that are newly copied in to-space and evacuates their fields.
+
 \subsection{Parallel garbage collection}
 
+A generational garbage collector offers quite good performance, but
+there is still the question, ``Is it fast enough?''  The process of
+traversing the heap is an inherently parallel process, and thus one
+avenue for speeding up the garbage collector when multiple cores are
+available are to perform parallel garbage collection.  GHC implements
+such a scheme~\XXX{}, and \emph{parallel collection} is the primary source of
+complexity in top-level loop of the garbage collector.  (Note that this
+is distinct from \emph{concurrent collection}, where the GC runs concurrently
+with user code which is mutating values on the heap.)
+
+There are two primary technical challenges that accompany building a
+parallel garbage collector.  The first is how to divide the GC work
+among the threads, the second is how to synchronize when two GC threads
+attempt to evacuate the same object.
+
+GHC overcomes the first challenge by utilizing the block structure of
+the heap.  In particular, a block in the to-space of a garbage
+collection constitutes a unit of work: a thread can either claim the
+block to scavenge for itself, or the block can be transferred to another
+thread to process.  Once blocks are chosen as the basic unit of
+work, there are a variety of mechanisms by which work can be shared:
+blocks can be statically assigned to GC threads with no runtime load
+balancing, blocks can be taken from a global queue which provides blocks
+to all threads, or a hybrid solution can have threads have local queues,
+but permit other threads to steal work from other queues when they are
+idle via a \emph{work-stealing queue structure}.~\XXX{}  GHC originally
+implemented a single global queue, but we have since switched work-stealing queues
+because they have much better data locality, as processors prefer to take
+work from their local queues before stealing work from others.
+
+The second challenge reflects the primary cost of parallel GC, which is
+the extra synchronization overhead any parallel scheme will impose.
+Once again, there are a range of possible choices.  One is to
+pessimistically lock the closure before copying it out (avoiding any
+duplicate work but incurring extra overhead for a spinlock), while
+another is to optimistically copy out the data and write the forwarding
+pointer out optimistically (requiring only a single CAS but wasting work
+in the event of a collision).  GHC originally implemented the first
+scheme, but now implements the second scheme. \Red{SM, do you remember
+why?}  Fortunately, this synchronization is only necessary for objects
+which must not be duplicated, e.g. mutable objects; for immutable
+objects, we carry out the copy without any synchronization, since the
+rare duplicate of an immutable data structure upon a collision is
+essentially unobservable.
+
 \subsection{Summary}
+
+We conclude by sketching the overall operation of GHC's parallel,
+generational, block-structured garbage collector, with all of the
+features that we have described thus far.
+
+The main garbage collection function
+\verb|GarbageCollect| in \verb|rts/sm/GC.c| proceeds (after all user
+execution is halted) as follows:
+
+\begin{enumerate}
+    \item Prepare all of the collected generations by moving their blocks
+        into the from-space and throwing out their mutable lists (recall the remembered
+        set is only necessary when the generation is not being collected.)
+        The blocks themselves indicate what generation live objects in them should be promoted to.
+    \item Wakeup the GC threads, initializing them with eager promotion enabled.
+    \item \emph{Evacuate} the roots of application (including the mutable lists of all older generations), giving work to the main GC thread to do.
+    \item In a loop, each thread:
+        \begin{enumerate}
+            \item Look for local blocks to \emph{scavenge} (e.g. if the thread recently evacuated some objects which it hasn't scavenged), starting with blocks from the oldest generation.
+            \item Try to steal blocks from another thread (at the very beginning of a GC, idle GC threads are likely to steal work from the main thread, if they didn't have any work to begin with).
+            \item Halt execution, but while there are still GC threads running, poll to see whether or not there is any work to do.
+        \end{enumerate}
+    \item Cleanup after the GC, which includes running finalizers, returning memory to the operating system, resurrecting threads~\XXX, etc.
+\end{enumerate}
+
+The \emph{evacuate} function \verb|evacuate| in \verb|rts/sm/Evac.c|
+takes a pointer to an object and attempts to copy it into a destination
+generation to-space, as specified by the block it resides in (or the generation that
+it needs to be promoted to, if eager promotion is enabled).  Before doing so,
+it performs the following checks:
+
+\begin{enumerate}
+    \item Is the object heap allocated? (If not, it is handled specially.)
+    \item Was the object already evacuated (e.g. the pointer already points
+        to a to-space, or the object is a forwarding pointer)?  If it
+        was, and to a generation which is younger than the intended
+        target, then it reports the evacuation as failed (so scavenge
+        can add a mutable reference pointing to the object to a mutable
+        list, etc.)
+\end{enumerate}
+
+After the copy, the original is overwritten with a forwarding pointer.
+If the object in question is mutable, this is done atomically with a
+compare-and-swap to avoid races between two threads evacuating the same
+object.
+
+The \emph{scavenge} function \verb|scavenge_block| in
+\verb|rts/sm/Scav.c| walks a pointer down the provided block (filled in
+previously by evacuate), reading the info table in order to determine
+what kind of object it is.  It evacuates the fields of the object,
+temporarily turning off eager promotion if the object is mutable.  If
+evacuation is unsuccessful for the field of a mutable object, it must be
+added back to the mutable list.  When the block is finished being
+scavenged, it gets pushed to the list of completed blocks.  The block
+that is scavenged can be thought of as the ``pending work queue''; this
+optimization was first suggested as part of Cheney's algorithm and
+avoids the need for an explicit queue of pending objects to scavenge.
+
+\subsection{Further reading}
+
+While we have discussed many of the most important features of GHC's
+garbage collector, there remain many other features we have not
+discussed here.  These include:
+
+\begin{itemize}
+    \item an implementation of a compacting collector,~\XXX{}
+    \item support for weak pointers and finalizers,~\XXX{} \Red{We might actually want to talk about this, it is probably one of the more voodoo-y parts of the system} and
+    \item garbage collection of static objects.~\XXX{}
+\end{itemize}
+
+We have also omitted many details about the features we have discussed.
+For a good account of the block-structured parallel garbage collector,
+please see~\cite{Marlow:2008:PGG:1375634.1375637}; however, since the
+paper was published the default locking and load balancing schemes for
+the parallel GC have changed, and we have implemented the improvement
+described in Section 7.1.  Additionally, the GHC Commentary has good
+articles for technically inclined GHC hackers on a variety of issues we
+have discussed here, including eager promotion~\XXX{}, remembered
+sets~\XXX{} \Red{ete etc}
