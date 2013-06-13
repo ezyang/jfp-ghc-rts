@@ -15,18 +15,24 @@ language with \emph{managed memory}.  What do we need?
 
 \subsection{Blocks}
 
-The very first consideration is this: ``Where is the memory coming
-from?''  The conventional design is to request a large, contiguous block
-of memory from the operating system and use it as the heap.  However,
-this scheme is fairly inflexible, especially when multiple heaps are
-necessary.
+The very first consideration is a low-level one: ``Where is the memory coming
+from?''  The runtime can request memory from the operating system via
+\verb|malloc|, but how much should it request, and how should it be
+used?  A simple design is to request a large, contiguous block of memory
+and use it as the heap, letting the garbage collector manage objects allocated
+within it.  However, this scheme is fairly inflexible: when one of these heaps
+runs out of memory, we need to double the size of the heap and copy all of the
+old data into the new memory.  Picking the initial size of the heap is very
+important, and when there are multiple heaps (as is the case in a generational
+garbage collector), these are black magic tuning parameters.
 
-Instead, GHC utilizes a \emph{block-structured heap}~\cite{Marlow:2008:PGG:1375634.1375637}.
+A more flexible scheme is a \emph{block-structured heap}~\cite{Marlow:2008:PGG:1375634.1375637}.
 The basic idea is to divide the heap into fixed-size $B$-byte blocks,
-where $B$ is a power of two: possibly non-contiguous blocks are then linked together in order to
-provide memory for the heap.  GHC uses 4kb blocks, but this is an easily
-adjustable constant.  With blocks, we can allocate and dynamically
-resize regions of memory at will.  There are some other benefits as well:
+where $B$ is a power of two: blocks are then linked together in order to
+provide memory for the heap.\footnote{GHC uses 4kb blocks, but this is an easily
+adjustable constant.}  These blocks need not be contiguous: thus, if your
+heap runs out of space, instead of having to double the size of your heap,
+you can simply chain a few more blocks onto it.  There are some other benefits as well:
 
 \begin{enumerate}
     \item Large objects (e.g. close to block size) do not have to be copied from one region to
@@ -43,7 +49,7 @@ resize regions of memory at will.  There are some other benefits as well:
         the heap without simultaneously executing a garbage collection, and
         precise garbage collection cannot be performed safely while running C code.
     \item Free memory can be recycled quickly, since a free block can be quickly
-        used somewhere else.
+        reused somewhere else.
 \end{enumerate}
 
 One reason why this scheme works so well is that most objects on the
