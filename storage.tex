@@ -22,9 +22,8 @@ used?  A simple design is to request a large, contiguous block of memory
 and use it as the heap, letting the garbage collector manage objects allocated
 within it.  However, this scheme is fairly inflexible: when one of these heaps
 runs out of memory, we need to double the size of the heap and copy all of the
-old data into the new memory.  Picking the initial size of the heap is very
-important, and when there are multiple heaps (as is the case in a generational
-garbage collector), these are black magic tuning parameters.
+old data into the new memory.  Picking the initial sizes of heaps can be an exercise
+in fiddling with black magic tuning parameters.
 
 A more flexible scheme is a \emph{block-structured heap}~\cite{Marlow:2008:PGG:1375634.1375637}.
 The basic idea is to divide the heap into fixed-size $B$-byte blocks,
@@ -41,13 +40,16 @@ you can simply chain a few more blocks onto it.  There are some other benefits a
         one object to live in a block, which can result in fragmentation.
         However, empirically this does not seem to have caused much of a problem.}
     \item Blocks make it easy to provide heap memory in contexts where it is
-        not possible to perform garbage collection.  The primary example of this
-        in GHC is the GMP arbitrary-precision arithmetic library, which requires
-        the ability to allocate memory for its internal computation.  If the heap
-        was contiguous, we would be left with no recourse if the heap ran out
-        of memory while GMP code was executing, since there is no way to resize
-        the heap without simultaneously executing a garbage collection, and
-        precise garbage collection cannot be performed safely while running C code.
+        not possible to perform garbage collection.  As an example, consider
+        the GMP arbitrary-precision arithmetic library.  This C code requires
+        the ability to allocate memory while performing internal computation.
+        However, if the heap runs out of memory, what can you do?  If the heap
+        were contiguous, you would now need to carry out a GC to free up some memory
+        (or get a larger heap); but this would require us to halt the C code
+        (arbitrarily deep in some internal computation) while simultaneously being
+        able to identify all pointers to the heap that it may be holding.  Whereas
+        in a block-structured heap, we can simply grab a new block and defer the GC
+        until later.
     \item Free memory can be recycled quickly, since a free block can be quickly
         reused somewhere else.
 \end{enumerate}
