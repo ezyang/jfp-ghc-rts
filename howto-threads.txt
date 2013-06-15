@@ -1,3 +1,30 @@
+from "Parallel and concurrent Programming in Haskell"
+    In many fields, the words parallel and concurrent are synonyms; not so
+    in programming, where they are used to describe fundamentally different
+    concepts.
+
+    A parallel program is one that uses a multiplicity of computational hard-
+    ware (e.g. multiple processor cores) in order to perform computation more
+    quickly. Different parts of the computation are delegated to different pro-
+    cessors that execute at the same time (in parallel ), so that results may be
+    delivered earlier than if the computation had been performed sequentially.
+    In contrast, concurrency is a program-structuring technique in which
+    there are multiple threads of control. Notionally the threads of control ex-
+    ecute “at the same time”; that is, the user sees their effects interleaved.
+    Whether they actually execute at the same time or not is an implementa-
+    tion detail; a concurrent program can execute on a single processor through
+    interleaved execution, or on multiple physical processors.
+
+    While parallel programming is concerned only with efficiency, concurrent
+    programming is concerned with structuring a program that needs to interact
+    with multiple independent external agents (for example the user, a database
+    server, and some external clients). Concurrency allows such programs to be
+    modular ; the thread that interacts with the user is distinct from the thread
+    that talks to the database. In the absence of concurrency, such programs
+    have to be written with event loops and callbacks—indeed, event loops and
+    callbacks are often used even when concurrency is available, because in many
+    languages concurrency is either too expensive, or too difficult, to use.
+
 THREADS
 -------
 
