@@ -42,6 +42,14 @@ any check whether or not a thunk was evaluated or not (an obvious
 alternative implementation strategy) is behind the ``tagless`` in STG's
 name.
 
+\SM{We don't do vectored returns, since GHC 4.0. Also
+  return-in-registers, which you might also find menioned in the
+  original STG paper, was removed in favour of unboxed tuples.}
+
+\SM{Tagless is a bit debatable these days.  We have tags in pointers
+  (pointer tagging).  Also the code pointer for a function closure is
+  the entry code for the function (not the ``eval'' code).}
+
 The fact that objects are always entered is an extremely helpful layer
 of indirection which is used for a variety of purposes by the runtime.
 For example, when a thunk finishes evaluation, we need to write back the

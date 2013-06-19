@@ -7,6 +7,7 @@
 
 \newcommand{\Red}[1]{{\color{red} #1}}
 \newcommand{\ToDo}[1]{{\color{blue} ToDo: #1}}
+\newcommand{\SM}[1]{{\color{green} SM: #1}}
 \newcommand{\nb}[1]{$\lhd$ \Red{#1} $\rhd$}
 \newcommand{\tocite}[0]{{\color{red} [cite]}\xspace}
 
@@ -28,13 +29,25 @@ The GHC runtime system is perhaps one of the most unusual language
 runtimes in wide use today.  Much of its implementation was directly
 motivated by the unusual (by popular programming language standards!)
 features in Haskell which the runtime needs to support.  Some of these
-features, e.g. lazy evaluation and ubiquitous concurrency, complicate
+features, such as lazy evaluation and ubiquitous concurrency, complicate
 the design of the system and require us to do a lot more work to give
 programmers the high-level behavior they desire.  Other features, such
 as an emphasis on pure computation without mutation, simplify the design
 components such as garbage collection and software transactional memory.
 
 \Red{Complete, flesh out, rewrite}
+
+\SM{This is a good start.  I think it will help to tell the reader up
+  front that we intend to focus on the main novel aspects of the
+  runtime how concurrency and parallelism, the garbage collector, and
+  lazy evaluation work.  Everything else we say will be stuff that you
+  need to know in order to understand these three main topics, and the
+  order of the paper will reflect this - talking about the essential
+  aspects of the evaluation model and data representations first,
+  because you need that to understand the rest.}
+
+\SM{Please feel free to label sections that you would like me to
+  write.}
 
 \input{evaluation.tex}
 \input{storage.tex}

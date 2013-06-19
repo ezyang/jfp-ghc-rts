@@ -59,7 +59,7 @@ need to be handled with some care to avoid fragmentation.  The blocks
 themselves are provided by the operating system in large units called
 \emph{megablocks}.\footnote{1Mb in size, in the current implementation.}
 
-Finally, each block has associated with a \emph{block descriptor}, which
+Finally, each block is associated with a \emph{block descriptor}, which
 contains information about the block such as what generation it belongs to, how full it is, what block
 group it is part of, etc.  An obvious place to put the block descriptor
 is at the beginning of a block, but this runs into problems when the block
@@ -87,10 +87,14 @@ promotion occurs by simply copying the object into the \emph{to-space},
 a process called \emph{evacuation}.  Evacuated objects are subsequently
 \emph{scavenged} to find what objects they refer to, so they can be evacuated as well.
 
+\SM{We probably shouldn't use the terms ``evacuate'' and
+  ``scavenge'', since I think the GHC GC uses them inconsistently with
+  the literature. (TODO: check).}
+
 The efficacy of generational collection hinges on the ``generational
 hypothesis'', which states that data that has been recently allocated is
-the most likely to die and become unreachable.  This is extremely true
-for functional programs, which are encouraged to use short-lived
+the most likely to die and become unreachable.  This tends to be
+particularly true of functional programs, which encourage the use of short-lived
 intermediate data structures to help structure computation.  In fact,
 functional programs allocate so much memory that it makes sense not to
 immediately promote data, since objects may not have had sufficient
@@ -103,7 +107,7 @@ two generations, but we never garbage collect just the younger
 generation, we always collect both on a minor collection.  This is in fact
 how GHC implements aging.}
 
-Use of a copying collector has other benefits for allocation heavy
+Use of a copying collector has other benefits for allocating heavy
 workloads.  In particular, copying collection ensures that free memory
 is contiguous, which allows for extremely efficient memory allocation
 using a \emph{bump allocator}---so named because a heap allocation
@@ -160,7 +164,7 @@ update them with their fully evaluated values---they are immutable
 afterwards.  Thus, we can immediately eliminate an updated thunk from
 the mutable list by \emph{eagerly promoting} the data the updated thunk
 points to into the same generation as the thunk itself.  Since the thunk
-is immutable, this data is guaranteed not to be GCed until the thunk
+is immutable, this data is guaranteed not to be GC'd until the thunk
 itself is GC'd as well.  This leads to an interesting constraint on how
 garbage collection proceeds: we must collect older generations first, so
 that objects we may want to promote have not been evacuated yet.
@@ -172,17 +176,26 @@ pointing to it, it cannot be evacuated again within the same GC.
 %   pointer to the new object, and \emph{scavenging}, which scans all
 %   objects that are newly copied in to-space and evacuates their fields.
 
+\SM{You captured all the issues here well. Nice job!}
+
 \subsection{Parallel garbage collection}
 
 A generational garbage collector offers quite good performance, but
 there is still the question, ``Is it fast enough?''  The process of
-traversing the heap is an inherently parallel process, and thus one
+traversing the heap is typically parallelisable, and thus one
 avenue for speeding up the garbage collector when multiple cores are
-available are to perform parallel garbage collection.  GHC implements
+available is to perform parallel garbage collection.  GHC implements
 such a scheme~\cite{Marlow:2008:PGG:1375634.1375637}, and \emph{parallel collection} is the primary source of
-complexity in top-level loop of the garbage collector.  (Note that this
-is distinct from \emph{concurrent collection}, where the GC runs concurrently
-with user code which is mutating values on the heap.)
+complexity in top-level loop of the garbage collector.
+
+Note the distinction between parallel collection and \emph{concurrent
+  collection}; in the latter, the GC runs concurrently with user code
+which is mutating values on the heap.  Concurrent collection requires
+synchronization between the GC and the mutator, and consequently is
+more complex.  GHC does not currently have a concurrent collector,
+although we have experimented with a form of concurrent collection in
+which individual cores have local heaps that can be collected
+independently of activity on the other cores~\cite{local-heaps}.
 
 There are two primary technical challenges that accompany building a
 parallel garbage collector.  The first is how to divide the GC work
@@ -219,7 +232,24 @@ objects, we carry out the copy without any synchronization, since the
 rare duplicate of an immutable data structure upon a collision is
 essentially unobservable.
 
+\SM{I think we don't need to talk about the two types of locking (I
+  don't think there's a deep reason to choose one over the other, just
+  minor engineering or performance issues).  What's more important to
+  mention here is that we can avoid locking immutable objects---a win
+  for immutability.}
+
+\SM{I think we should talk about the whole idea of having small
+  nurseries that fit in the cache, since this is the only way to scale
+  GC when you have multiple cores allocating fast (they run into the
+  memory bandwidth otherwise).  And related to this is the idea that
+  we don't want to do any load-balancing when we do G0 collections,
+  because that ruins the cache.  Some measurements in the ICFP'09
+  paper.}
+
 \subsection{Summary}
+
+\SM{Not sure whether going into this much detail is helpful to the
+  average reader.  I'm prepared to be persuaded otherwise.}
 
 We conclude by sketching the overall operation of GHC's parallel,
 generational, block-structured garbage collector, with all of the
