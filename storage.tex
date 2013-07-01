@@ -181,21 +181,18 @@ pointing to it, it cannot be evacuated again within the same GC.
 \subsection{Parallel garbage collection}
 
 A generational garbage collector offers quite good performance, but
-there is still the question, ``Is it fast enough?''  The process of
-traversing the heap is typically parallelisable, and thus one
-avenue for speeding up the garbage collector when multiple cores are
-available is to perform parallel garbage collection.  GHC implements
-such a scheme~\cite{Marlow:2008:PGG:1375634.1375637}, and \emph{parallel collection} is the primary source of
-complexity in top-level loop of the garbage collector.
-
-Note the distinction between parallel collection and \emph{concurrent
-  collection}; in the latter, the GC runs concurrently with user code
-which is mutating values on the heap.  Concurrent collection requires
-synchronization between the GC and the mutator, and consequently is
-more complex.  GHC does not currently have a concurrent collector,
-although we have experimented with a form of concurrent collection in
-which individual cores have local heaps that can be collected
-independently of activity on the other cores~\cite{local-heaps}.
+there is still the question, ``Is it fast enough?''  One avenue for
+speeding up the garbage collector when multiple cores are available is
+to perform \emph{parallel garbage collection}, having multiple threads
+traverse the heap in parallel.  Note the distinction from
+\emph{concurrent collection}, where the GC runs concurrently with user
+code which is mutating values on the heap.  GHC implements parallel
+collection~\cite{Marlow:2008:PGG:1375634.1375637} but not concurrent
+collection: concurrent collection requires synchronization between the
+GC and the mutator and consequently is more complex.  However, we have
+experimented with a form of concurrent collection in which individual
+cores have local heaps that can be collected independently of activity
+on the other cores~\cite{local-heaps}.
 
 There are two primary technical challenges that accompany building a
 parallel garbage collector.  The first is how to divide the GC work
@@ -215,28 +212,29 @@ but permit other threads to steal work from other queues when they are
 idle via a \emph{work-stealing queue structure}.~\cite{Arora:1998:TSM:277651.277678}  GHC originally
 implemented a single global queue, but we have since switched work-stealing queues
 because they have much better data locality, as processors prefer to take
-work from their local queues before stealing work from others.
+work from their local queues before stealing work from others.  This is
+especially beneficial when the nursery fits in the cache: \Red{finish}
 
 The second challenge reflects the primary cost of parallel GC, which is
-the extra synchronization overhead any parallel scheme will impose.
-Once again, there are a range of possible choices.  One is to
-pessimistically lock the closure before copying it out (avoiding any
-duplicate work but incurring extra overhead for a spinlock), while
-another is to optimistically copy out the data and write the forwarding
-pointer out optimistically (requiring only a single CAS but wasting work
-in the event of a collision).  GHC originally implemented the first
-scheme, but now implements the second scheme. \Red{SM, do you remember
-why?}  Fortunately, this synchronization is only necessary for objects
-which must not be duplicated, e.g. mutable objects; for immutable
-objects, we carry out the copy without any synchronization, since the
-rare duplicate of an immutable data structure upon a collision is
-essentially unobservable.
+the extra synchronization overhead any parallel scheme will impose.  In
+particular, we must prevent the GC from duplicating mutable objects when
+multiple threads attempt to evacuate the same object by synchronizing
+the object (by either locking it pessimistically or compare-and-swapping
+optimistically).  This synchronization is expensive; fortunately, there
+is a wonderful benefit for immutable objects: they require no
+synchronization, because it is safe to have multiple copies of an
+immutable data structure!  Eliminating the locks in these cases accounts
+for a 20-30\% speedup, which is nothing to sneeze at.
 
-\SM{I think we don't need to talk about the two types of locking (I
-  don't think there's a deep reason to choose one over the other, just
-  minor engineering or performance issues).  What's more important to
-  mention here is that we can avoid locking immutable objects---a win
-  for immutability.}
+%   In general, writing a parallel garbage collector is tricky business:
+%   it's easy to wipe out performance gains by accident.  Of particular delicacy
+%   is the cache behavior
+
+%   \SM{I think we don't need to talk about the two types of locking (I
+%     don't think there's a deep reason to choose one over the other, just
+%     minor engineering or performance issues).  What's more important to
+%     mention here is that we can avoid locking immutable objects---a win
+%     for immutability.}
 
 \SM{I think we should talk about the whole idea of having small
   nurseries that fit in the cache, since this is the only way to scale

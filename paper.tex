@@ -35,6 +35,25 @@ programmers the high-level behavior they desire.  Other features, such
 as an emphasis on pure computation without mutation, simplify the design
 components such as garbage collection and software transactional memory.
 
+% ALTERNATE OPEN
+%   runtimes in wide use today.  Yes, at its very core, it contains many of
+%   the features that programmers have come to expect in the runtime systems
+%   of high-level programs: an implementation of exceptions, a generational
+%   garbage collector and support for multithreaded execution.  But a large
+%   portion of the runtime is dedicated to supporting features of Haskell
+%   which are rarely found in other programming languages: lazy evaluation,
+%   lightweight preemptive concurrency and software transactional memory, to
+%   name a few.
+
+%   Much of its implementation was directly
+%   motivated by the unusual (by popular programming language standards!)
+%   features in Haskell which require runtime support.  Some of these
+%   features, e.g. lazy evaluation and ubiquitous concurrency, complicate
+%   the design of the system and require us to do a lot more work to give
+%   programmers the high-level behavior they desire.  Other features, such
+%   as an emphasis on pure computation without mutation, simplify the design
+%   components such as garbage collection and software transactional memory.
+
 \Red{Complete, flesh out, rewrite}
 
 \SM{This is a good start.  I think it will help to tell the reader up

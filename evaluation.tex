@@ -1,5 +1,8 @@
 \section{Execution model}
 
+We begin our exploration of GHC's runtime system with a description
+of the execution model of compiled Haskell code.
+
 While the execution model of compiled code isn't in the domain of the
 runtime system per se (it is the compiler's responsibility to generate
 code that abides by the various conventions), various parts of the
@@ -8,6 +11,21 @@ role to play in the design of components of the runtime system (e.g. the
 garbage collector, concurrency).  In this section, we offer a brief
 explanation of some of the most important aspects of the \emph{Spineless Tagless G-machine} (STG),
 GHC's core execution model.
+
+\subsection{(Untitled)}
+
+What does compiled Haskell code do?  Haskell is a high-level language,
+and thus compiled Haskell code bears little resemblance to the code that
+was originally written.  This is in contrast to a programming language
+like C, where there is a clear operational reading of the written
+code.\footnote{Of course, ignoring such vagaries as under-defined
+specification and optimizing compilers.}  Fortunately, GHC does have a
+\emph{purely functional} intermediate language, which does have an
+operational reading: this language is the \emph{Spineless Tagless
+G-machine}.~\cite{PeytonJones1992}.
+
+While there are many details to STG which an interested reader should consult
+\cite{PeytonJones1992} and \cite{Marlow2006}, a brief overview the \XXX
 
 \subsection{Heap representation}
 
