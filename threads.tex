@@ -48,7 +48,7 @@ the errno flag, so that it can be restored when the thread is
 rescheduled.  Because the compiled code is responsible for yielding to
 the scheduler, it can be very efficient about how much other processor
 state must be saved; while general purpose C-based coroutine libraries
-must save all registers,~\XXX{} a Haskell thread will usually only need
+must save all registers, a Haskell thread will usually only need
 one or two registers to be saved.\footnote{This is what the fast path \texttt{stg\_gc\_*} functions are for.}
 
 Once we have a way of suspending and resuming threads, the scheduler
@@ -122,8 +122,8 @@ always create a bound thread, as its Haskell code may make an FFI call
 which must be scheduled on the same original OS thread.
 
 It is simple to modify the scheduler so that no other thread may use
-an OS thread that a thread is bound to, but we can do better.  We must modify
-the scheduler loop some more:
+an OS thread that a thread is bound to, but we can do better, at the
+cost of more complexity in the scheduler loop:
 
 \begin{enumerate}
     \item \emph{Check if we need to yield the capability to some other OS thread, e.g. if an FFI call has just finished,}
@@ -143,7 +143,7 @@ little overhead when no FFI calls are being made.
 
 \subsection{Load balancing}
 
-Assuming that the compiled Haskell code is thread safe~\XXX, it is now
+Assuming that the compiled Haskell code is thread safe~(see Section~\ref{sec:sync}), it is now
 very simple to have the scheduler loop run on multiple OS threads:
 allocate multiple capabilities!  Each OS thread in possession of a capability
 runs the scheduler loop, and everything works the way you'd expect.
@@ -164,7 +164,8 @@ locks on as many idle capabilities as it can, and then pushes its excess
 threads onto their run queues.  Finally, it releases the locks and
 signals on each idle capability's condition variable that they can
 continue running.  The benefit of this scheme is that the run queues are
-kept completely unsynchronized. \Red{Why isn't a work stealing queue used here?}
+kept completely unsynchronized, but a plausible alternative is to use
+work-stealing queues.
 
 \subsection{Messages and whiteholes}
 
@@ -203,10 +204,9 @@ When a closure on the heap needs to be locked, e.g. because it is a
 mutable cell, GHC uses a very simple spinlock, attempting to replace the
 header of a closure with a \emph{whitehole} header.  If another thread
 enters the closure, they will spinlock until the original header is
-replaced. \Red{An example of the entry code indirection helping out!}
-Spinlocks are great for locking closures, since the critical regions
-they protect are very short, and it would be expensive to allocate a
-mutex for every closure that needed one.
+replaced.  Spinlocks are great for locking closures, since the critical
+regions they protect are very short, and it would be expensive to
+allocate a mutex for every closure that needed one.
 
 \subsection{MVar}
 
@@ -262,30 +262,40 @@ to be interrupted.  Once the thread is preempted, the scheduler induces
 an exception and walks up the stack, much in the same way as a normal
 exception would be handled.
 
-There are two primary differences.  The first is that a thread which
-is messaged may have been blocking on some other thread (i.e. on an MVar);
-thus, when an asynchronous exception is received, the thread must remove itself
-from the blocked list of threads.  This is usually relatively simple, although
-if your queues are singly linked you will need some cleverness to remove
-a thread from it.\footnote{GHC does this by stubbing out an entry with an
-indirection, the very same that is used when a thunk is replaced with its
-true value, and modifying queue handling code to skip over indirections.}
+There are two primary differences.  The first is that a thread which is
+messaged may have been blocking on some other thread (i.e. on an MVar);
+thus, when an asynchronous exception is received, the thread must remove
+itself from the blocked list of threads.  If your queues are singly
+linked, you will need some cleverness to remove a thread from
+it.\footnote{GHC does this by stubbing out an entry with an indirection,
+    the very same that is used when a thunk is replaced with its true
+value, and modifying queue handling code to skip over indirections.}
 
 The second difference is how lazy evaluation is handled. When pure code
 raises an exception, referential transparency demands that any other
 execution of that code will result in the same exception.  Thus, while
 we are walking up the stack, when we see update frames \Red{link back},
 we replace the thunk it would have updated with a new thunk that always
-the exception.  In the case of an asynchronous exception, however, the
+the exception.  However, in the case of an asynchronous exception, the
 code could have simply been unlucky: when someone else asks for the same
-computation, we should simply resume where we left off.  Thus, when we
-hit the first update frame, we \emph{freeze} the state of evaluation by
-saving the entire stack above the
-update frame in an \verb|AP_STACK|.  Evaluating an
-\verb|AP_STACK| concatenates the old stack fragment to the current
-stack, thus resuming the computation.  Finally, replace the current top
-of the stack (originally an update frame) with a pointer to the
-\verb|AP_STACK| and continue recursively. \Red{Check the details here with RaiseAsync.c:raiseAsync}
+computation, we should simply resume where we left off.  Thus, we
+instead \emph{freeze} the state of evaluation by saving the current
+stack into the thunk.~\cite{Reid1999}  In more detail, this involves walking up the stack
+and perform the following operations when we encounter an update frame:
+
+\begin{enumerate}
+    \item Allocating a new \verb|AP_STACK| closure which contains the
+        contents of the stack above the frame, and overwriting the
+        update frame with a pointer to this closure,
+    \item Truncate the stack up to and including the update frame, and
+    \item Pushing a pointer to the new \verb|AP_STACK| closure to the stack.
+\end{enumerate}
+
+When another thread evaluates one of these suspended thunks,
+\verb|AP_STACK| pushes the frozen stack onto the current stack, thus
+resuming the computation.  The top of the new stack may point to
+yet another suspended thunk, thus repeating the process until we
+have reached the point of the original execution.
 
 \subsection{STM}
 
@@ -341,7 +351,7 @@ queues.
 
 \Red{Comment about interaction with GC}
 
-\subsection{Synchronization on the heap}
+\subsection{Synchronization and black holes} \label{sec:sync}
 
 In previous sections, we asserted that execution of Haskell threads
 could be made parallel, assuming that the compiled Haskell code was
@@ -360,14 +370,31 @@ extremely costly.
 Here, purity comes to the rescue.  As thunks represent pure computation,
 we actually do not mind if two threads accidentally evaluate the same
 thunk in parallel: they are guaranteed to come up with the same result.
-Thus, in principle, updates to thunks can be made unsychronized, at the
-cost of occasional duplication of work.
+Thus, in principle, updates to thunks can be unsychronized, at the cost
+of occasional duplication of work.
 
-PROPER UDPATE
+There are two details we must attend to.  The first is that while when
+we are not synchronizing updates to thunks, we must ensure that any
+races to updates are benign.  There are two tricks to ensure this: we
+must give every thunk a result field (ordinarily unused) which receives
+the updated value, allowing us to write the result non-destructively,
+and we must write the result before we update the header.  Thus, the
+only states of a thunk another thread can see are ``well-formed thunk'',
+``thunk, but with the result field filled in'' and ''well-formed
+indirection''.\footnote{Appropriate write barriers must be added to
+    ensure the CPU does not reorder these instructions.}
 
-BLACK HOLE
+The second is that sometimes thunks take a long time to evaluate, in
+which case we would like to atomically claim the thunk and arrange for
+other threads to block on our thread for the result.  This is what
+a \emph{black hole} is for: a black hole is a closure which we can
+overwrite a thunk which states that some thread has claimed the thunk
+and is evaluating it.  Whereas entering a thunk causes us to start
+evaluating it, entering a black hole causes us to block on the thread
+which is evaluating the thunk.\footnote{Note that this wouldn't be
+possible without the fact that we always enter closures to evaluate them!}
 
-\Red{describe the scheme in \cite{Harris:2005:HSM:1088348.1088354}}
+\Red{Finish}
 
 \subsection{Summary}
 

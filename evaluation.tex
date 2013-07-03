@@ -140,8 +140,49 @@ other components of the runtime system.
 
 \Red{Maybe explain in more detail}
 
-\subsection{Else}
+\subsection{Black holes}
 
+One particular type of closure worth some attention is the \emph{black
+hole}.  The semantics of a black hole are relatively simple: a black
+hole represents a thunk that is currently being evaluated.  A thunk
+can be \emph{claimed} by overwriting it with a black hole. The entry
+code for a black hole should arrange for the thread to receive the value
+of the thunk after it is evaluated, some way or another.
+
+Black holes were originally proposed as a solution for a space leak that
+occurs when tail calls are being made in the STG.~\cite{Jones2008} The
+problem is relatively simple: suppose that you are evaluating the thunk \verb|last [1..10000]|,
+where \verb|last| is a tail recursive function:
+
+\begin{verbatim}
+last []     = error "empty list"
+last (x:[]) = x
+last (x:xs) = last xs
+\end{verbatim}
+
+Because \verb|[1..10000]| is constructed lazily, you might expect
+evaluating this thunk to take constant space, since the front of the
+list is never retained.  However, there is a problem: the front of the
+list is retained by the thunk itself, \verb|last [1..10000]|.  The thunk
+will eventually get overwritten by the result of the computation, but
+only at the \emph{end} of the computation, by which point the entirety
+of \verb|[1..10000]| is resident in memory.  To solve this problem, when
+\verb|last [1..10000]| is evaluated, we can \emph{immediately} overwrite
+it with a \verb|BLACKHOLE|; now the thunk no longer retains the list.\footnote{As an optimization, we
+can \emph{lazily} blackhole by waiting until a garbage collection runs to blackhole, since that is the
+earliest point at which the data can be freed.}
+
+The simplicity of black holes belies their utility in a variety of contexts.
+In particular:
+
+\begin{itemize}
+\item Black holes allow us to detect some infinite loops: if a thread attempts
+    to evaluate a black hole which it previously claimed, that is an infinite loop!
+\item In a multiprocessor setting, black holes allow us to avoid duplicating work when multiple
+    threads attempt to evaluate the same object.\footnote{It is worth noting that for this use-case, we have to \emph{eagerly} blackhole thunks.}  Instead, a thread blocks on the owner
+    of a black hole, waiting for it to finish processing.  This is described in more
+    detail in Section~\ref{sec:sync}.
+\end{itemize}
 
 \subsection{Notes}
 
