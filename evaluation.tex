@@ -12,20 +12,59 @@ garbage collector, concurrency).  In this section, we offer a brief
 explanation of some of the most important aspects of the \emph{Spineless Tagless G-machine} (STG),
 GHC's core execution model.
 
+
 \subsection{(Untitled)}
 
+Understanding the compiled code of high-level programming languages is
+difficult for multiple reasons.  First, the abstractions offered by the
+high-level language must be compiled down into machine code, which can
+obscure the original intent of the code. Second, these languages will
+typically be compiled with optimizations, such that even when a program
+is written in a direct, low-level style, the optimized executable may be
+substantially different.\footnote{Even optimizing C can obscure the
+resulting executables, as anyone who has tried to use \texttt{gdb} on
+optimized C can attest.}
+
+While there is little we can do about the second problem, once optimizations
+have been applied we can consider how to transform
+
 What does compiled Haskell code do?  Haskell is a high-level language,
-and thus compiled Haskell code bears little resemblance to the code that
-was originally written.  This is in contrast to a programming language
-like C, where there is a clear operational reading of the written
-code.\footnote{Of course, ignoring such vagaries as under-defined
-specification and optimizing compilers.}  Fortunately, GHC does have a
-\emph{purely functional} intermediate language, which does have an
-operational reading: this language is the \emph{Spineless Tagless
+and thus the executable code produced by a Haskell compiler bears little
+resemblance to the code that was originally written.
+
+Fortunately, GHC does have a \emph{purely
+functional} intermediate language, which does have an operational
+reading: this language is the \emph{Spineless Tagless
 G-machine}.~\cite{PeytonJones1992}.
 
-While there are many details to STG which an interested reader should consult
-\cite{PeytonJones1992} and \cite{Marlow2006}, a brief overview the \XXX
+STG is 
+
+\begin{itemize}
+    \item Function application: tail call (direct jump)
+    \item Let expression: heap allocation
+    \item Case expression: evaluation of a thunk
+    \item Constructor application: return to continuation
+\end{itemize}
+
+
+
+The fact that all function applications are tail calls is perhaps what
+causes the largest divergence between the runtime execution of Haskell
+and other block-structured languages.  In C, when a function is entered
+a stack frame (e.g. continuation) is always pushed onto the stack; in
+Haskell, we may push zero, one, or more frames on the stack before
+jumping to the function destination.
+
+While there are many details to STG, for which an interested reader
+should consult \cite{PeytonJones1992} and \cite{Marlow2006}, a brief
+overview of the STG will be useful for understanding some of the things
+the runtime system needs to support.  STG is a simple lambda calculus,
+for which the following common operations are given an operational
+reading:
+
+\subsection{Spineless Tagless G-machine}
+
+The Spineless Tagless G-machine (STG) is 
 
 \subsection{Heap representation}
 
@@ -101,10 +140,47 @@ other components of the runtime system.
 
 \Red{Maybe explain in more detail}
 
-\subsection{Summary}
+\subsection{Else}
+
+
+\subsection{Notes}
 
 \Red{More stuff}
 
-The name of STG is a bit misleading: its modern implementation in GHC
-would have to be described as the ``Usually-Spineless Mostly-Tagged
-G-machine.''
+While the original paper about the Spineless Tagless
+G-machine~\cite{PeytonJones1992} remains the best source for an
+in-detail explanation about STG, many details have changed over the two
+decades it has been last published.  If one had to sum up its modern
+implementation in GHC, one might call it the ``Usually-Spineless
+Mostly-Tagged G-machine.''  Briefly, the important changes are as
+follows:
+
+\begin{itemize}
+    \item STG is no longer compiled into C, instead, it is
+        compiled into a more low-level language C--~\cite{Jones1999}, allowing
+        GHC to change details such as calling conventions and utilize
+        more low level functionality (e.g. tail calls, explicit stack
+        layout, computing targets of jumps and implementing exceptions).
+    \item The stipulation that closures have a uniform representation
+        has been relaxed.  The most important change is how functions
+        are represented: while the paper originally proposed a push/enter
+        model, GHC now uses an eval/apply model~\cite{Marlow2006}, in
+        which the code pointer of function info tables points to the code
+        for the function itself, and not code for reading arguments off of
+        the stack.  This also means that the stack representation is
+        different: there is now only a single stack for continuations and
+        update frames (alongside the second C stack for register spills).
+    \item Furthermore, pointers are dynamically tagged with information
+        that may allow code to avoid jumping into a closure in order to
+        ensure that it is evaluated---STG is not
+        tagless!~\cite{Marlow2007}  The original dynamic tagging paper
+        suggests that these tags could be erased for only a performance
+        hit, but in fact, in some places, they are required.  This also
+        means that vectored-returns have gone the way of the dinosaur.
+    \item The spineless in STG's name refers to the fact that GHC stores
+        the intermediate state of evaluating a thunk on the stack,
+        rather than on the ``spine'' of the thunk itself.  Under some
+        circumstances, such as in the case of an interrupt, it is
+        profitable to write out this state back to the thunk, so that
+        this work can be resumed later.~\cite{Reid1999} \Red{Maybe this is gratuitous}
+\end{itemize}

@@ -119,7 +119,10 @@ thread}, which is a thread which is guaranteed to run on the same
 operating system thread whenever it is scheduled.  GHC refers to these
 as \emph{in-calls}, because any external code which calls into GHC will
 always create a bound thread, as its Haskell code may make an FFI call
-which must be scheduled on the same original OS thread.  We must modify
+which must be scheduled on the same original OS thread.
+
+It is simple to modify the scheduler so that no other thread may use
+an OS thread that a thread is bound to, but we can do better.  We must modify
 the scheduler loop some more:
 
 \begin{enumerate}
@@ -259,9 +262,41 @@ to be interrupted.  Once the thread is preempted, the scheduler induces
 an exception and walks up the stack, much in the same way as a normal
 exception would be handled.
 
-However, there is a big difference between how \Red{Continue me!}
+There are two primary differences.  The first is that a thread which
+is messaged may have been blocking on some other thread (i.e. on an MVar);
+thus, when an asynchronous exception is received, the thread must remove itself
+from the blocked list of threads.  This is usually relatively simple, although
+if your queues are singly linked you will need some cleverness to remove
+a thread from it.\footnote{GHC does this by stubbing out an entry with an
+indirection, the very same that is used when a thunk is replaced with its
+true value, and modifying queue handling code to skip over indirections.}
+
+The second difference is how lazy evaluation is handled. When pure code
+raises an exception, referential transparency demands that any other
+execution of that code will result in the same exception.  Thus, while
+we are walking up the stack, when we see update frames \Red{link back},
+we replace the thunk it would have updated with a new thunk that always
+the exception.  In the case of an asynchronous exception, however, the
+code could have simply been unlucky: when someone else asks for the same
+computation, we should simply resume where we left off.  Thus, when we
+hit the first update frame, we instead record the entire stack above the
+frame on to the thunk (an \verb|AP_STACK|).  Evaluating an
+\verb|AP_STACK| concatenates the old stack fragment to the current
+stack, thus resuming the computation.  Finally, replace the current top
+of the stack (originally an update frame) with a pointer to the
+\verb|AP_STACK| and continue recursively. \Red{Check the details here with RaiseAsync.c:raiseAsync}
 
 \subsection{STM}
+
+Software Transactional Memory, or STM, is an abstraction for concurrent
+communication which emphasizes transactions as the basic unit of
+communication.  The big benefit of STM over MVars is that they are
+composable: while programs involving multiple MVars must be very careful
+to avoid deadlock, programs using STM can be composed together
+effortlessly.
+
+Before discussing what is needed to support STM in the runtime system,
+it is worth mentioning 
 
 \subsection{Sparks}
 

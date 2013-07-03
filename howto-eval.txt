@@ -1,6 +1,17 @@
 EVALUATION MODEL
 ----------------
 
+
+- Compare it to C (what is different?)
+
+The simulated DM:
+    - Isn't interested in the STG data type; instead, he wants to know
+      what things look like from SOURCE Haskell code.  Approach: define
+      fragments of Haskell which translate directly into their STG variants.
+    - Wants to know what to avoid, if he's writing fast code that will
+      act predictably
+
+
 LAZY EVALUATION
 ---------------------
 
