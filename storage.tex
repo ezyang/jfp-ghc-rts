@@ -91,6 +91,10 @@ a process called \emph{evacuation}.  Evacuated objects are subsequently
   ``scavenge'', since I think the GHC GC uses them inconsistently with
   the literature. (TODO: check).}
 
+\Red{EZY: I think, probably, we should just use these terms, since the literature
+doesn't really have a snappy name for "copy to to-space" and "scan for pointers",
+and I use these terms a lot later on.}
+
 The efficacy of generational collection hinges on the ``generational
 hypothesis'', which states that data that has been recently allocated is
 the most likely to die and become unreachable.  This tends to be
@@ -176,7 +180,7 @@ pointing to it, it cannot be evacuated again within the same GC.
 %   pointer to the new object, and \emph{scavenging}, which scans all
 %   objects that are newly copied in to-space and evacuates their fields.
 
-\SM{You captured all the issues here well. Nice job!}
+% \SM{You captured all the issues here well. Nice job!}
 
 \subsection{Parallel garbage collection}
 
@@ -203,17 +207,21 @@ GHC overcomes the first challenge by utilizing the block structure of
 the heap.  In particular, a block in the to-space of a garbage
 collection constitutes a unit of work: a thread can either claim the
 block to scavenge for itself, or the block can be transferred to another
-thread to process.  Once blocks are chosen as the basic unit of
-work, there are a variety of mechanisms by which work can be shared:
-blocks can be statically assigned to GC threads with no runtime load
-balancing, blocks can be taken from a global queue which provides blocks
-to all threads, or a hybrid solution can have threads have local queues,
-but permit other threads to steal work from other queues when they are
-idle via a \emph{work-stealing queue structure}.~\cite{Arora:1998:TSM:277651.277678}  GHC originally
-implemented a single global queue, but we have since switched work-stealing queues
-because they have much better data locality, as processors prefer to take
-work from their local queues before stealing work from others.  This is
-especially beneficial when the nursery fits in the cache: \Red{finish}
+thread to process.  Once blocks are chosen as the basic unit of work,
+there are a variety of mechanisms by which work can be shared: blocks
+can be statically assigned to GC threads with no runtime load balancing,
+blocks can be taken from a global queue which provides blocks to all
+threads, or a hybrid solution can have threads have local queues, but
+permit other threads to steal work from other queues when they are idle
+via a \emph{work-stealing queue
+structure}.~\cite{Arora:1998:TSM:277651.277678}  GHC originally
+implemented a single global queue, but we have since switched
+work-stealing queues because they have much better data locality, as
+processors prefer to take work from their local queues before stealing
+work from others.  In fact, we don't want to do any load-balancing on
+minor collections, because it ruins locality by shipping work off to
+another core when the data is likely \emph{already} in the cache of the
+original core.~\cite{Marlow2009}
 
 The second challenge reflects the primary cost of parallel GC, which is
 the extra synchronization overhead any parallel scheme will impose.  In
@@ -226,6 +234,15 @@ synchronization, because it is safe to have multiple copies of an
 immutable data structure!  Eliminating the locks in these cases accounts
 for a 20-30\% speedup, which is nothing to sneeze at.
 
+One important parameter which must be set properly is the size of the
+young generation, i.e. the nursery.  If the nursery is too small, then
+we will need to perform minor garbage collections too frequently.  But
+if it is too large, then cores will generate a lot of memory traffic
+getting data that is not in their cache.  In general, memory bandwidth
+is the bottleneck when multiple cores are allocating quickly; thus,
+having the nursery be the size of the cache is generally the best setting.
+\Red{But perhaps see the discussion at } \verb|http://donsbot.wordpress.com/2010/07/05/ghc-gc-tune-tuning-haskell-gc-settings-for-fun-and-profit/|
+
 %   In general, writing a parallel garbage collector is tricky business:
 %   it's easy to wipe out performance gains by accident.  Of particular delicacy
 %   is the cache behavior
@@ -236,13 +253,13 @@ for a 20-30\% speedup, which is nothing to sneeze at.
 %     mention here is that we can avoid locking immutable objects---a win
 %     for immutability.}
 
-\SM{I think we should talk about the whole idea of having small
-  nurseries that fit in the cache, since this is the only way to scale
-  GC when you have multiple cores allocating fast (they run into the
-  memory bandwidth otherwise).  And related to this is the idea that
-  we don't want to do any load-balancing when we do G0 collections,
-  because that ruins the cache.  Some measurements in the ICFP'09
-  paper.}
+%   \SM{I think we should talk about the whole idea of having small
+%     nurseries that fit in the cache, since this is the only way to scale
+%     GC when you have multiple cores allocating fast (they run into the
+%     memory bandwidth otherwise).  And related to this is the idea that
+%     we don't want to do any load-balancing when we do G0 collections,
+%     because that ruins the cache.  Some measurements in the ICFP'09
+%     paper.}
 
 \subsection{Summary}
 
