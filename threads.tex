@@ -279,8 +279,9 @@ we replace the thunk it would have updated with a new thunk that always
 the exception.  In the case of an asynchronous exception, however, the
 code could have simply been unlucky: when someone else asks for the same
 computation, we should simply resume where we left off.  Thus, when we
-hit the first update frame, we instead record the entire stack above the
-frame on to the thunk (an \verb|AP_STACK|).  Evaluating an
+hit the first update frame, we \emph{freeze} the state of evaluation by
+saving the entire stack above the
+update frame in an \verb|AP_STACK|.  Evaluating an
 \verb|AP_STACK| concatenates the old stack fragment to the current
 stack, thus resuming the computation.  Finally, replace the current top
 of the stack (originally an update frame) with a pointer to the
@@ -296,7 +297,16 @@ to avoid deadlock, programs using STM can be composed together
 effortlessly.
 
 Before discussing what is needed to support STM in the runtime system,
-it is worth mentioning 
+it is worth mentioning what we do not have to do.  In many languages,
+an STM implementation must also manage all side-effects that any code
+in a transaction may perform.  In an impure language, there may be many
+of these side-effects (even if they are local), and the runtime must
+make them transactional at great cost.  In Haskell, however, the type system
+enforces that code running in an STM transaction will only ever perform
+pure computation or explicit manipulation of shared state.  This eliminates
+a large inefficiency that plagues many other STM implementation.
+
+\Red{How is it implemented}
 
 \subsection{Sparks}
 
@@ -346,6 +356,16 @@ the heap must be replaced with the fully evaluated value.  As multiple
 threads could evaluate a thunk in parallel, these writes must be
 synchronized. A poorly implemented synchronization scheme could be
 extremely costly.
+
+Here, purity comes to the rescue.  As thunks represent pure computation,
+we actually do not mind if two threads accidentally evaluate the same
+thunk in parallel: they are guaranteed to come up with the same result.
+Thus, in principle, updates to thunks can be made unsychronized, at the
+cost of occasional duplication of work.
+
+PROPER UDPATE
+
+BLACK HOLE
 
 \Red{describe the scheme in \cite{Harris:2005:HSM:1088348.1088354}}
 
