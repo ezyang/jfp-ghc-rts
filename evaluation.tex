@@ -140,7 +140,7 @@ other components of the runtime system.
 
 \Red{Maybe explain in more detail}
 
-\subsection{Black holes}
+\subsection{Black holes} \label{sec:blackhole}
 
 One particular type of closure worth some attention is the \emph{black
 hole}.  The semantics of a black hole are relatively simple: a black
@@ -167,10 +167,10 @@ list is retained by the thunk itself, \verb|last [1..10000]|.  The thunk
 will eventually get overwritten by the result of the computation, but
 only at the \emph{end} of the computation, by which point the entirety
 of \verb|[1..10000]| is resident in memory.  To solve this problem, when
-\verb|last [1..10000]| is evaluated, we can \emph{immediately} overwrite
-it with a \verb|BLACKHOLE|; now the thunk no longer retains the list.\footnote{As an optimization, we
-can \emph{lazily} blackhole by waiting until a garbage collection runs to blackhole, since that is the
-earliest point at which the data can be freed.}
+\verb|last [1..10000]| is evaluated, we can \emph{eagerly} overwrite it
+with a \verb|BLACKHOLE|; now the thunk no longer retains the list.  As
+an optimization, we can \emph{lazily} blackhole by waiting until the
+thread becomes descheduled, e.g. for a garbage collection.
 
 The simplicity of black holes belies their utility in a variety of contexts.
 In particular:

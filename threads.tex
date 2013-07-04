@@ -3,16 +3,21 @@
 We now turn our attention to the implementation of
 concurrency~\cite{PeytonJones:1996:CH:237721.237794} and
 parallelism~\cite{Harris:2005:HSM:1088348.1088354} in the GHC runtime.
-\Red{Something here; maybe the old saw about the difference between
-concurrency and parallelism, or maybe something about why Haskell's
-concurrency/parallelism support is so cool.}
+It is well worth noting the difference between concurrency and
+parallelism: a parallel program uses multiple processing cores in order
+to speed up computation, while a concurrent program simply involves
+multiple threads of control, which notionally execute ``at the same
+time'' but may be implemented merely by interleaving their execution.
 
-\Red{Some motivation here}
-
-%   The implementation of many of the features in this section can be
-%   divided into two parts: an implementation in the uniprocessor case
-%   (concurrency), and an implementation in the multiprocessor case
-%   (parallelism).
+GHC is both concurrent and parallel, but many of the features we
+describe are applicable in non-parallel but concurrent systems (e.g.
+systems which employ cooperative threading on one core): indeed, some
+were developed before GHC had a shared memory multi-processor
+implementation.  Thus, in the first section, we consider how to
+implement \emph{threads} without relying on hardware support.  We then
+describe a number of inter-thread communication mechanisms which are
+useful in concurrent programs (and say how to synchronize them). Finally
+describe what needs to be done to make \emph{compiled} code thread-safe.
 
 \subsection{Threads}
 
@@ -29,15 +34,16 @@ support thousands of threads, which is supported poorly by most
 underlying operating systems.  Furthermore, in the case that a program
 is run with only one operating system thread (e.g. the code in question
 is not thread safe), only one thread of execution is supported: all
-concurrency is lost, and must be implemented in userspace, as is the
+concurrency is lost and must be implemented in userspace, as is the
 case with many asynchronous IO libraries.
 
 Instead, we must \emph{multiplex} multiple Haskell threads onto a single
 OS thread.  This requires two adjustments: first, we must be able to
 induce compiled Haskell code to yield to a scheduler, so that another
-Haskell thread can be run.  It is very easy for a thread to
-cooperatively suspend itself: all it needs to do is ask for a garbage
-collection; thus, we can preempt a thread by setting its heap limit to
+Haskell thread can be run.  Preemptive scheduling can sometimes be
+difficult to implement, but for GC'd languages, there is an obvious
+point where all threads get preempted: when they require a garbage
+collection. Thus, we can preempt a thread by setting its heap limit to
 zero, triggering a faux ``heap overflow'' that transfers control to the
 scheduler.\footnote{This can have problems when a thread is in a tight,
     non-allocating loop; however, better concurrency in such cases can
@@ -45,9 +51,9 @@ be achieved by forcing the compiler to emit heap checks at all function
 prologues, even when no allocation is necessary.}
 Second, we must save the thread's context, e.g. the stack pointer and
 the errno flag, so that it can be restored when the thread is
-rescheduled.  Because the compiled code is responsible for yielding to
-the scheduler, it can be very efficient about how much other processor
-state must be saved; while general purpose C-based coroutine libraries
+rescheduled.  Compiled code can be very efficient about how much other processor
+state must be saved, because it knows what its state is.
+While general purpose C-based coroutine libraries
 must save all registers, a Haskell thread will usually only need
 one or two registers to be saved.\footnote{This is what the fast path \texttt{stg\_gc\_*} functions are for.}
 
@@ -73,7 +79,7 @@ threads are not thread-safe.
 \subsection{Foreign function interface}
 
 While multiplexing is a very attractive solution for supporting
-lightweight concurrency, there are some places when the illusion of ``a
+light-weight concurrency, there are some places when the illusion of ``a
 Haskell thread is simply an operating system thread, but cheaper''
 breaks down.  These cases are especially prevalent when considered with
 the \emph{foreign function interface} (FFI)~\cite{Marlow04extendingthe},
@@ -83,25 +89,24 @@ FFI call blocks?  As our concurrency is purely cooperative, if the FFI
 call refuses to return to the scheduler, the execution of all other
 threads will grind to a halt.
 
-The upshot is that we need to decouple OS threads into two parts: the OS
+This problem requires us to decouple OS threads into two parts: the OS
 thread itself (called a \emph{Task} in GHC terminology), and the Haskell
 execution context (called a \emph{Capability}).  The Haskell execution
 context can be thought of as the scheduler loop and is responsible for
-the contents of the run queue; when executing it is owned by the
+the contents of the run queue: when executing, it is owned by the
 particular OS thread which is running it.  A single-threaded Haskell
-program, there would only be one capability---in this case, the
-capability can be thought as the lock on the Haskell runtime.  This
-decoupling allows a capability to be run on different operating system
-threads as necessary: now a blocking FFI call can be managed by
+program would have one capability---in this case, the
+capability can be thought as a global lock on the Haskell runtime.
+
+Decoupling OS threads in this way allows a capability to be run on
+different operating system threads: a blocking FFI call is handled by
 releasing the capability before making the FFI call: if there is another
-idle \emph{worker thread}, it can pick up the now free capability and
-continue running Haskell code.  It is preferable to move the Haskell
-execution context, rather than the FFI call, to another thread, as it
-avoids an OS level thread context switch.\footnote{To see this, consider
-the execution from the perspective of the OS thread, which executes
-an FFI call by releasing a lock on an object (the capability),
-running some C code, and then re-acquiring a lock on the
-capability.}
+idle \emph{worker thread}, it can acquire the now free capability and
+continue running Haskell code.  Why not move the FFI call rather than
+the Haskell execution context?  The key is that we would like to avoid
+an OS level context switch: from the perspective of the OS thread, it
+executes an FFI call by releasing a lock (the capability), running the C
+code and then re-acquiring the lock. \Red{Make sure this is right.}
 
 Thus, we have to modify the scheduler loop as follows:
 
@@ -110,20 +115,19 @@ Thus, we have to modify the scheduler loop as follows:
     \item \emph{Run as before.}
 \end{enumerate}
 
-Another problem that occurs is when the FFI code maintains some thread
-local state.  When we pass capabilities around OS threads, we make no
+Another problem occurs when the foreign code requires thread local
+state.  Now that capabilities are passed around OS threads, we make no
 guarantee that any given FFI call will be performed on the same OS
-thread: this can cause problems for FFI code of this type.  To
-accomodate this, Haskell introduces the concept of a \emph{bound
-thread}, which is a thread which is guaranteed to run on the same
-operating system thread whenever it is scheduled.  GHC refers to these
-as \emph{in-calls}, because any external code which calls into GHC will
-always create a bound thread, as its Haskell code may make an FFI call
-which must be scheduled on the same original OS thread.
+thread.  To accomodate this, Haskell introduces the concept of a
+\emph{bound thread}, which is a thread which always runs on the same
+operating system thread.  GHC also calls these \emph{in-calls}, due to
+the fact that external code which calls into Haskell must be bound: if
+it makes the Haskell code calls out via the FFI again, the inner and
+outer C code may rely on the same thread local state.
 
-It is simple to modify the scheduler so that no other thread may use
-an OS thread that a thread is bound to, but we can do better, at the
-cost of more complexity in the scheduler loop:
+How can we support bound threads?  A simple scheme is to give a bound thread
+an OS thread and forbid any other thread from using it. However, we can
+do better, at the cost of a little more complexity:
 
 \begin{enumerate}
     \item \emph{Check if we need to yield the capability to some other OS thread, e.g. if an FFI call has just finished,}
@@ -137,9 +141,8 @@ cost of more complexity in the scheduler loop:
     \item \emph{Run as before.}
 \end{enumerate}
 
-The movement of capabilities from task to task is somewhat intricate,
-but it is necessary to properly support FFI calls, and imposes very
-little overhead when no FFI calls are being made.
+While the dance of capabilities from task to task is somewhat intricate,
+it imposes no overhead when bound threads are not used.
 
 \subsection{Load balancing}
 
@@ -151,21 +154,52 @@ runs the scheduler loop, and everything works the way you'd expect.
 There is one primary design choice: should each capability have its own
 run queue, or should there be a single global run queue?  A global run
 queue avoids the need for any sort of load balancing, but requires
-synchronization and makes it difficult to keep a Haskell thread on one
-core, destroying data locality.  With separate run queues, however,
-threads must be load balanced, lest one capability accumulate too many
+synchronization and makes it difficult to keep Haskell threads running on
+the same core, destroying data locality.  With separate run queues, however,
+threads must be load balanced: one capability could accumulate too many
 threads while the other capabilities idle.
 
-The very simple load balancing scheme GHC uses is as follows: when a capability
-runs out of threads to run, it suspends itself (releasing its lock) and
-waits on a condition variable.  When a capability has too many threads
-to run (it checks each iteration of its schedule loop), it takes out
-locks on as many idle capabilities as it can, and then pushes its excess
+The very simple load balancing scheme GHC uses is as follows: when a
+capability runs out of threads to run, it suspends itself (releasing its
+lock) and waits on a condition variable.  When a capability has too many
+threads to run (it checks each iteration of its schedule loop), it takes
+out locks on as many idle capabilities as it can and pushes its excess
 threads onto their run queues.  Finally, it releases the locks and
-signals on each idle capability's condition variable that they can
-continue running.  The benefit of this scheme is that the run queues are
-kept completely unsynchronized, but a plausible alternative is to use
-work-stealing queues.
+signals on each idle capabilities that they can start running.  The
+benefit of this scheme is that the run queues are kept completely
+unsynchronized, but a plausible alternative is to use work-stealing
+queues.
+
+\subsection{Sparks}
+
+Up until now, the threads we have discussed were explicitly asked for
+by the user.  In some cases, the user will only have one thread (because
+their application does not need to be concurrent), in which case extra
+cores will be unused.  Is there any way we can take advantage of extra
+capacity?
+
+Haskell takes advantage of pure lazy evaluation to offer \emph{sparks},
+which are extremely light-weight threads with the express purpose of
+evaluating a thunk to head normal form.  Because thunks do not have
+side effects, it is safe to evaluate them speculatively: a spark may
+or may not be evaluated, depending on whether or not there are idle capabilities.
+
+Since sparks are even lighter-weight than threads, they are represented
+separately and stored in \emph{spark pools}.  When a capability decides
+it has no work to do, it creates a \emph{spark thread}, which repeatedly
+attempts to retrieve a spark from the capability's spark pool and
+evaluate it.  If the capability receives any real work (e.g. a thread
+unblocks), it immediately declares that there are no more sparks to
+evaluate so that the spark thread exits.
+
+Whereas threads rarely need to be load balanced, sparks frequently need
+to be migrated, as the capability that is generating
+sparks is the one that also is doing real work.  Sparks are balanced using
+bounded work-stealing queues~\XXX, where oldest sparks are stolen first.
+Additionally, many sparks will end up never being evaluated: these sparks
+are \emph{fizzled} and should be garbage collected. \Red{Indeed, the garbage
+collector is responsible for taking fizzled sparks and removing them from the
+spark pool... how does this work}
 
 \subsection{Messages and whiteholes}
 
@@ -178,37 +212,38 @@ are implemented on a uniprocessor, they can be implemented directly;
 in a multithreaded setting, some synchronization is necessary.
 
 Under the hood, the GHC runtime has two primary ways of synchronizing:
-\emph{messages} and \emph{whiteholes} (effectively spinlocks).  The
+\emph{messages} and \emph{white holes} (effectively a spinlock).  The
 runtime makes very sparing use of OS level condition variables and
-mutexes, since these operations tend to be expensive.
+mutexes, since they tend to be expensive.
 
 GHC uses a very simple message passing architecture to pass messages
-between capabilities.  A capability sends a message by performing the following steps:
+between capabilities.  A capability sends a message by:
 
 \begin{enumerate}
-    \item Allocate a message object on the heap with the appropriate data;
-    \item Take out a lock on the message inbox of the destination capability;
-    \item Append the message onto the inbox;
-    \item Interrupt the capability, using the same mechanism as the context switch timer (setting the heap limit to zero);
-    \item Release the lock.
+    \item Allocating a message object on the heap;
+    \item Taking out a lock on the message inbox of the destination capability;
+    \item Appending the message onto the inbox;
+    \item Interrupting the capability, using the same mechanism as the context switch timer (setting the heap limit to zero); and
+    \item Releasing the lock.
 \end{enumerate}
 
 This allows the message to be handled by the destination capability at
 its convenience, i.e. after the running Haskell code yields and we
-return to the scheduling loop.  The primary benefit of message passing
-is it removes the need to synchronize any of the non-local state that a
-capability \emph{might} want to modify. \Red{Why don't the message
-inboxes use spinlocks?}
+return to the scheduling loop.  In general, the benefit of message
+passing systems is that they remove the need for synchronizing any of
+the non-local state that another capability \emph{might} want to modify: instead,
+the capability just sends a message asking for the state to be modified.
 
-When a closure on the heap needs to be locked, e.g. because it is a
-mutable cell, GHC uses a very simple spinlock, attempting to replace the
-header of a closure with a \emph{whitehole} header.  If another thread
-enters the closure, they will spinlock until the original header is
-replaced.  Spinlocks are great for locking closures, since the critical
-regions they protect are very short, and it would be expensive to
-allocate a mutex for every closure that needed one.
+When sending a message is not appropriate, e.g. in the case of
+synchronized access to closures which are not owned by any capability in
+particular, GHC instead uses a very simple spinlock on the closure
+\emph{header}, replacing the header with a \emph{white hole} header that
+indicates the object is locked.  If another thread enters the closure,
+they will spinlock until the original header is restored.  A spinlock is
+used as the critical regions they protect tend to be very short, and it would
+be expensive to allocate a mutex for every closure that needed one.
 
-\subsection{MVar}
+\subsection{MVars}
 
 We now describe how to implement MVars, the simplest form of
 synchronization available to Haskell threads.  An MVar is a mutable
@@ -216,19 +251,19 @@ location that may be empty.  There are two operations which operate on
 an MVar: \verb|takeMVar|, which blocks until the location is non-empty,
 then reads and returns the value, leaving the location empty, and
 \verb|putMVar|, which dually blocks until the location is empty, then
-writes its value into location.
+writes its value into location.  An MVar can be used as a lock if you
+ignore the contents of the location.
 
 The blocking behavior is the most interesting aspect of MVars:
-ordinarily, one would have to implement this using a condition variable.
-However, because our Haskell threads are not operating system threads,
-we can do something much more lightweight: when a thread realizes it
-needs to block, it adds itself to a \emph{blocked threads queue}
-corresponding to the MVar, and then removes itself from the run queue.
-When another thread fills in the MVar, it can check if there is a thread
-on the blocked list and wake it up immediately.  In a multithreaded
-setting, the only necessary synchronization is a spinlock for the queue
-manipulation and a wakeup message to the capability which owns the
-unblocked thread.
+ordinarily, one would have to implement this functionality using a
+condition variable.  However, because our Haskell threads are not
+operating system threads, we can do something much more light-weight:
+when a thread realizes it needs to block, it simply adds itself to a
+\emph{blocked threads queue} corresponding to the MVar.  When another
+thread fills in the MVar, it can check if there is a thread on the
+blocked list and wake it up immediately.  In a multithreaded setting,
+the only necessary synchronization is a spinlock to manipulate the queue
+and a wakeup message to the capability which owns the unblocked thread.
 
 This scheme has a number of good properties.  First, it allows us
 to implement efficient \emph{single wake-up} on MVars, where only one of
@@ -238,16 +273,16 @@ remains blocked on an MVar indefinitely unless another thread holds the
 MVar indefinitely.  Finally, because threads are garbage collected
 objects, if the MVar a thread is blocking on becomes unreachable,
 \emph{so does the thread.}  Thus, in some cases, we can tell when
-a blocked thread will never make any further progress, and terminate it.
+a blocked thread is deadlocked and terminate it.
 
 \subsection{Asynchronous exceptions}
 
 MVars are a cooperative form of communication, where a thread must
 explicitly opt-in to receive messages.  Asynchronous
-exceptions~\cite{Marlow:2001:AEH:378795.378858}, on the other hand
-permit threads to asynchronously raise an exception in another thread
+exceptions~\cite{Marlow:2001:AEH:378795.378858}, on the other hand,
+permit threads to induce an exception in another thread
 without its cooperation.  Asynchronous exceptions are much more
-difficult to program than their synchronous brethren: as the signal can
+difficult to program with than their synchronous brethren: as a signal can
 occur at any point in a program's execution, the program must be careful
 to register handlers which ensure that any locks are released and
 invariants are preserved.  In \emph{pure} functional programs, this requirement
@@ -258,18 +293,22 @@ aborting speculative computation and handling user interrupts.
 
 With messages, it is very simple to trigger an asynchronous exception:
 simply send a throw-to message to the capability which owns the thread
-to be interrupted.  Once the thread is preempted, the scheduler induces
-an exception and walks up the stack, much in the same way as a normal
-exception would be handled.
+to be interrupted.  It is easy to add an exception masking flag to a
+thread, which causes the handling of these messages to be deferred until
+exceptions are unmasked again.  Once the thread is preempted, the
+scheduler induces an exception and walks up the stack, much in the same
+way as a normal exception would be handled.
 
-There are two primary differences.  The first is that a thread which is
+There are two primary differences between how asynchronous exceptions
+and normal exceptions are handled.  The first is that a thread which is
 messaged may have been blocking on some other thread (i.e. on an MVar);
 thus, when an asynchronous exception is received, the thread must remove
-itself from the blocked list of threads.  If your queues are singly
-linked, you will need some cleverness to remove a thread from
-it.\footnote{GHC does this by stubbing out an entry with an indirection,
-    the very same that is used when a thunk is replaced with its true
-value, and modifying queue handling code to skip over indirections.}
+itself from the blocked list of threads.\footnote{If your queues are
+    singly linked, you will need some cleverness to entries. GHC does
+    this by stubbing out an entry with an indirection, the very same
+that is used when a thunk is replaced with its true value, and modifying
+queue handling code to skip over indirections; because blocking queues
+live on the heap, the garbage collector will clean it up for us in the end.}
 
 The second difference is how lazy evaluation is handled. When pure code
 raises an exception, referential transparency demands that any other
@@ -280,13 +319,13 @@ the exception.  However, in the case of an asynchronous exception, the
 code could have simply been unlucky: when someone else asks for the same
 computation, we should simply resume where we left off.  Thus, we
 instead \emph{freeze} the state of evaluation by saving the current
-stack into the thunk.~\cite{Reid1999}  In more detail, this involves walking up the stack
+stack into the thunk.~\cite{Reid1999}  This involves walking up the stack
 and perform the following operations when we encounter an update frame:
 
 \begin{enumerate}
     \item Allocating a new \verb|AP_STACK| closure which contains the
         contents of the stack above the frame, and overwriting the
-        update frame with a pointer to this closure,
+        old thunk\footnote{Possibly a black hole.} with a pointer to this closure,
     \item Truncate the stack up to and including the update frame, and
     \item Pushing a pointer to the new \verb|AP_STACK| closure to the stack.
 \end{enumerate}
@@ -295,7 +334,7 @@ When another thread evaluates one of these suspended thunks,
 \verb|AP_STACK| pushes the frozen stack onto the current stack, thus
 resuming the computation.  The top of the new stack may point to
 yet another suspended thunk, thus repeating the process until we
-have reached the point of the original execution.
+have reached the point of the original execution. \Red{This is probably not understandable}
 
 \subsection{STM}
 
@@ -318,84 +357,107 @@ a large inefficiency that plagues many other STM implementation.
 
 \Red{How is it implemented}
 
-\subsection{Sparks}
-
-Up until now, the threads we have discussed were explicitly asked for
-by the user.  In some cases, the user will only have one thread (because
-their application does not need to be concurrent), in which case extra
-cores will be unused.  Is there any way we can take advantage of extra
-capacity?
-
-Haskell takes advantage of pure lazy evaluation to offer \emph{sparks},
-which are extremely lightweight threads with the express purpose of
-evaluating a thunk to head normal form.  Because thunks do not have
-side effects, it is safe to evaluate them speculatively, or to not
-evaluate them at all; if they are truly needed they will get forced
-appropriately.
-
-Since sparks are even lighter-weight than threads, they are represented
-separately and stored in \emph{spark pools}.  When a capability decides
-it has no work to do, it creates a \emph{spark thread}, which repeatedly
-attempts to retrieve a spark from the capability's spark pool and
-evaluate it.  If the capability receives any real work (e.g. a thread
-unblocks), then it responds to the spark threads request that there are no
-more sparks to evaluate, so that it exits.
-
-It is relatively important to ensure sparks can be load balanced across
-capabilities, as the capability that is most likely to be generating
-sparks is one that also is doing real work.  Sparks are balanced using
-bounded work-stealing queues~\XXX; empirically, it seems that using a FIFO
-ordering (so the oldest sparks are stolen first) is best, although this
-requires more synchronization on our implementation of work-stealing
-queues.
-
-\Red{Comment about interaction with GC}
-
 \subsection{Synchronization and black holes} \label{sec:sync}
 
 In previous sections, we asserted that execution of Haskell threads
 could be made parallel, assuming that the compiled Haskell code was
 thread-safe.  As any developer who has needed to write thread-safe code
-can attest, this is a tall order!  However, in Haskell we have a leg up:
-the vast majority of code written is pure and does not perform explicit
-mutation, so we do not mind paying the costs of explicitly synchronizing
-other mutable state (as is the case for MVars). However, there is one
-major performance bottleneck that we have to worry about: lazy
-evaluation!  Recall that after a thunk has been evaluated, its value on
-the heap must be replaced with the fully evaluated value.  As multiple
-threads could evaluate a thunk in parallel, these writes must be
-synchronized. A poorly implemented synchronization scheme could be
-extremely costly.
+can attest, this is a tall order!
 
-Here, purity comes to the rescue.  As thunks represent pure computation,
-we actually do not mind if two threads accidentally evaluate the same
-thunk in parallel: they are guaranteed to come up with the same result.
-Thus, in principle, updates to thunks can be unsychronized, at the cost
-of occasional duplication of work.
+Fortunately, much of this work is already done.  We have already seen various mechanisms
+for explicit interthread communication, which are all designed with
+concurrent execution in mind:  synchronizing them is a relatively simple
+task.  Furthermore, the vast majority of Haskell code is pure, and needs no
+synchronization.
 
-There are two details we must attend to.  The first is that while when
-we are not synchronizing updates to thunks, we must ensure that any
-races to updates are benign.  There are two tricks to ensure this: we
-must give every thunk a result field (ordinarily unused) which receives
-the updated value, allowing us to write the result non-destructively,
-and we must write the result before we update the header.  Thus, the
-only states of a thunk another thread can see are ``well-formed thunk'',
-``thunk, but with the result field filled in'' and ''well-formed
-indirection''.\footnote{Appropriate write barriers must be added to
-    ensure the CPU does not reorder these instructions.}
+However, there is one major feature we have to worry about: lazy
+evaluation.  Recall that after a thunk has been evaluated, its value on
+the heap must be replaced with the fully evaluated value. Multiple
+threads could evaluate a thunk in parallel, so na\"ively, these writes
+must be synchronized.  This is extremely costly: Haskell programs do a
+lot of thunk updates!
 
-The second is that sometimes thunks take a long time to evaluate, in
-which case we would like to atomically claim the thunk and arrange for
-other threads to block on our thread for the result.  This is what
-a \emph{black hole} is for: a black hole is a closure which we can
-overwrite a thunk which states that some thread has claimed the thunk
-and is evaluating it.  Whereas entering a thunk causes us to start
-evaluating it, entering a black hole causes us to block on the thread
-which is evaluating the thunk.\footnote{Note that this wouldn't be
-possible without the fact that we always enter closures to evaluate them!}
+Once again, our saving grace is purity: as thunks represent pure
+computation, evaluating a thunk twice has no observable effect: both
+evaluations are guaranteed to come up with the same result.  Thus, we
+should be able to keep updates to thunk unsynchronized, at the cost of
+occasional duplication of work when two threads race to evaluate the
+same thunk.
 
-\Red{Finish}
+There are two details we must attend to.  The first detail is the fact
+that a race can still be harmful, if we need to update a thunk in
+multiple steps and the intermediate states are not valid.  In the case
+of a thunk update, we need to both update the header and write down a
+pointer to the result; if we update the header first, then the
+intermediate state is not well-formed (the result field is empty); on
+the other hand, if we update the result field first, we might clobber
+important information in the thunk.  Instead, we leave a blank word in
+every thunk where the result can be written in non-destructively, after
+which the header of the closure can be changed.\footnote{Appropriate
+write barriers must be added to ensure the CPU does not reorder these
+instructions.}
+
+\begin{verbatim}
+word    step 1   step 2   step 3
+   0     THUNK    THUNK      IND \ valid closure
+   1         -   result   result /
+   2   payload  payload  payload <- payload is slop
+\end{verbatim}
+
+The second detail is that some thunks take a long time to evaluate: we'd
+like to avoid duplicating them.  Instead, when we start evaluating them,
+we'd like other threads to block on us for the result.  This is
+precisely what a \emph{black hole} (Section~\ref{sec:blackhole}) is for!
+A thread seeking to evaluate the thunk will instead enter the black
+hole; in a concurrent setting, we can place the thread on the blocked
+queue of the other thread.  It is somewhat difficult to put a blocked
+queue on the thunk itself (due to the lack of synchronization); instead,
+GHC uses a per-thread list of black hole blockers which is traversed
+every time a thread finishes updating a thunk.
+
+In our original discussion, black holes were \emph{eagerly} written to
+thunks upon evaluation, with the optimization that this could be
+\emph{lazily} deferred for later.  If a black hole is written eagerly,
+it is on the fast path of thunk updates, and we cannot use
+synchronization.  We call these \emph{eager black holes} (also known as
+\emph{grey holes}), which do not guarantee exclusivity.  Lazy blackholing is done more infrequently (when a thread is preempted), and thus
+we can afford to use a CAS to implement them.\footnote{While multiple
+    threads may have eagerly blackholed a thunk, we guarantee only one
+    thread has lazily blackholed it.  If a thunk \emph{must not} be
+duplicated, it can achieve this by forcing all of its callers to perform
+lazy blackholing
+(\texttt{noDuplicate\#}).  \texttt{unsafePerformIO} uses precisely
+this mechanism in order to avoid duplication of IO effects.}
+
+The upshot is that GHC is able to implement lazy evaluation without any
+synchronization for most thunk updates, applying synchronization
+\emph{only} when it is specifically necessary. The cost of this scheme
+is low: a single extra field in thunk and a (rare) duplication of work
+upon a race.
 
 \subsection{Summary}
 
+Haskell \emph{threads} are light-weight threads of execution which
+multiplex onto multiple CPU cores.  Each core has a \emph{Haskell
+execution context} which contains a scheduler for running these threads;
+in order to handle FFI calls execution contexts can migrate from core to
+core as necessary.  Threads are load balanced across execution contexts
+by having execution contexts with work push threads to contexts which
+don't.  Sparks are a simple way of utilizing idle cores when there is no
+other real work to do.
+
+By in large, all inter-thread communication in Haskell is explicit, thus
+making it much easier to compile Haskell in a thread-safe way.
+\emph{MVars}, \emph{asynchronous exceptions} and \emph{STM} are
+explicitly used by Haskell code and can be efficiently implemented by
+taking advantage of our representation of Haskell threads.  The basic
+techniques by which these are synchronized are \emph{messages} and
+\emph{white holes} (spinlocks).  The only implicit inter-thread
+communication that occurs is lazy evaluation.  However, due to purity,
+we can largely avoid synchronizing thunk updates, utilizing \emph{eager
+blackholing} to reduce duplicate work, and synchronized \emph{lazy
+blackholing} when duplication is unacceptable.
+
 \subsection{Further reading}
+
+We have said little about how to use the concurrency mechanisms described here. \XXX
