@@ -201,58 +201,18 @@ are \emph{fizzled} and should be garbage collected. \Red{Indeed, the garbage
 collector is responsible for taking fizzled sparks and removing them from the
 spark pool... how does this work}
 
-\subsection{Messages and whiteholes}
-
-Up until now, we focused purely on how to ensure multiple threads could
-execute concurrently, without considering the other essential aspect of
-concurrency: synchronized communication.  Haskell offers a variety of
-ways for Haskell threads to interact with each other (MVars,
-asynchronous exceptions, STM, even lazy evaluation).  When these features
-are implemented on a uniprocessor, they can be implemented directly;
-in a multithreaded setting, some synchronization is necessary.
-
-Under the hood, the GHC runtime has two primary ways of synchronizing:
-\emph{messages} and \emph{white holes} (effectively a spinlock).  The
-runtime makes very sparing use of OS level condition variables and
-mutexes, since they tend to be expensive.
-
-GHC uses a very simple message passing architecture to pass messages
-between capabilities.  A capability sends a message by:
-
-\begin{enumerate}
-    \item Allocating a message object on the heap;
-    \item Taking out a lock on the message inbox of the destination capability;
-    \item Appending the message onto the inbox;
-    \item Interrupting the capability, using the same mechanism as the context switch timer (setting the heap limit to zero); and
-    \item Releasing the lock.
-\end{enumerate}
-
-This allows the message to be handled by the destination capability at
-its convenience, i.e. after the running Haskell code yields and we
-return to the scheduling loop.  In general, the benefit of message
-passing systems is that they remove the need for synchronizing any of
-the non-local state that another capability \emph{might} want to modify: instead,
-the capability just sends a message asking for the state to be modified.
-
-When sending a message is not appropriate, e.g. in the case of
-synchronized access to closures which are not owned by any capability in
-particular, GHC instead uses a very simple spinlock on the closure
-\emph{header}, replacing the header with a \emph{white hole} header that
-indicates the object is locked.  If another thread enters the closure,
-they will spinlock until the original header is restored.  A spinlock is
-used as the critical regions they protect tend to be very short, and it would
-be expensive to allocate a mutex for every closure that needed one.
-
 \subsection{MVars}
 
+Haskell offers a variety of ways for Haskell threads to interact with
+each other (MVars, asynchronous exceptions, STM, even lazy evaluation).
 We now describe how to implement MVars, the simplest form of
-synchronization available to Haskell threads.  An MVar is a mutable
+synchronized communication available to Haskell threads.  An MVar is a mutable
 location that may be empty.  There are two operations which operate on
 an MVar: \verb|takeMVar|, which blocks until the location is non-empty,
 then reads and returns the value, leaving the location empty, and
 \verb|putMVar|, which dually blocks until the location is empty, then
-writes its value into location.  An MVar can be used as a lock if you
-ignore the contents of the location.
+writes its value into location.  An MVar can be thought of as a lock when
+its contents are ignored.
 
 The blocking behavior is the most interesting aspect of MVars:
 ordinarily, one would have to implement this functionality using a
@@ -261,9 +221,7 @@ operating system threads, we can do something much more light-weight:
 when a thread realizes it needs to block, it simply adds itself to a
 \emph{blocked threads queue} corresponding to the MVar.  When another
 thread fills in the MVar, it can check if there is a thread on the
-blocked list and wake it up immediately.  In a multithreaded setting,
-the only necessary synchronization is a spinlock to manipulate the queue
-and a wakeup message to the capability which owns the unblocked thread.
+blocked list and wake it up immediately.
 
 This scheme has a number of good properties.  First, it allows us
 to implement efficient \emph{single wake-up} on MVars, where only one of
@@ -284,20 +242,20 @@ permit threads to induce an exception in another thread
 without its cooperation.  Asynchronous exceptions are much more
 difficult to program with than their synchronous brethren: as a signal can
 occur at any point in a program's execution, the program must be careful
-to register handlers which ensure that any locks are released and
+to register handlers which ensure that any resources are released and
 invariants are preserved.  In \emph{pure} functional programs, this requirement
 is easier to fulfill, as pure code can always be safely aborted.  When
 asynchronous exceptions are available, however, they are useful
 in a variety of cases, including timing out long running computation,
 aborting speculative computation and handling user interrupts.
 
-With messages, it is very simple to trigger an asynchronous exception:
-simply send a throw-to message to the capability which owns the thread
-to be interrupted.  It is easy to add an exception masking flag to a
-thread, which causes the handling of these messages to be deferred until
-exceptions are unmasked again.  Once the thread is preempted, the
-scheduler induces an exception and walks up the stack, much in the same
-way as a normal exception would be handled.
+Triggering an asynchronous exception is relatively simple with
+preemptive scheduling: preempt the target thread back to the scheduler,
+at which point the scheduler can introduce the exception and walk up the
+stack, much in the same way a normal exception would be handled.  In
+case a thread is operating in a sensitive region, an exception masking
+flag can be set, which defers the delivery of the exception (it is saved
+to a list of waiting exceptions on the thread itself).
 
 There are two primary differences between how asynchronous exceptions
 and normal exceptions are handled.  The first is that a thread which is
@@ -356,6 +314,51 @@ pure computation or explicit manipulation of shared state.  This eliminates
 a large inefficiency that plagues many other STM implementation.
 
 \Red{How is it implemented}
+
+\Red{Maybe move this below messages and white holes}
+
+\subsection{Messages and white holes}
+
+In the descriptions above, we said very little about the synchronization
+that is necessary to implement them in a multiprocessor environment.
+Under the hood, the GHC runtime has two primary methods of synchronization:
+\emph{messages} and \emph{white holes} (effectively a spinlock).  The
+runtime makes very sparing use of OS level condition variables and
+mutexes, since they tend to be expensive.
+
+GHC uses a very simple message passing architecture to pass messages
+between capabilities.  A capability sends a message by:
+
+\begin{enumerate}
+    \item Allocating a message object on the heap;
+    \item Taking out a lock on the message inbox of the destination capability;
+    \item Appending the message onto the inbox;
+    \item Interrupting the capability, using the same mechanism as the context switch timer (setting the heap limit to zero); and
+    \item Releasing the lock.
+\end{enumerate}
+
+This allows the message to be handled by the destination capability at
+its convenience, i.e. after the running Haskell code yields and we
+return to the scheduling loop.  In general, the benefit of message
+passing systems is that they remove the need for synchronizing any of
+the non-local state that another capability \emph{might} want to modify: instead,
+the capability just sends a message asking for the state to be modified.
+
+When sending a message is not appropriate, e.g. in the case of
+synchronized access to closures which are not owned by any capability in
+particular, GHC instead uses a very simple spinlock on the closure
+\emph{header}, replacing the header with a \emph{white hole} header that
+indicates the object is locked.  If another thread enters the closure,
+they will spinlock until the original header is restored.  A spinlock is
+used as the critical regions they protect tend to be very short, and it would
+be expensive to allocate a mutex for every closure that needed one.
+
+We can now describe how MVars and asynchronous exceptions are
+synchronized.  An MVar uses a white hole on the MVar itself to protect
+manipulations of the blocked thread queue; additionally, when it needs
+to wakeup a thread, it may need to send a message to the capability
+which owns the unblocked thread.  An asynchronous exception is even
+simpler: it is simply a message to the capability which owns the thread.
 
 \subsection{Synchronization and black holes} \label{sec:sync}
 
