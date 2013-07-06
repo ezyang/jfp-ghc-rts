@@ -22,112 +22,116 @@ describe what needs to be done to make \emph{compiled} code thread-safe.
 \subsection{Threads}
 
 Concurrent Haskell~\cite{PeytonJones:1996:CH:237721.237794} exposes the
-abstraction of a \emph{Haskell thread}, which is a concurrent thread of
-execution.  Given that operating systems also native threads, the
-essential question for an implementation of Haskell threads is this:
-what is the correspondence between Haskell threads and OS threads?
+abstraction of a \emph{Haskell thread} to a programmer. As the
+operating system also provides native threads, one may wonder if there
+any difference between a Haskell thread and an OS thread.
 
-A simple scheme is to require a \emph{one-to-one} mapping, an approach
-taken by many other languages with multithreading support.
-Unfortunately, this approach is expensive: the GHC runtime would like to
-support thousands of threads, which is supported poorly by most
-underlying operating systems.  Furthermore, in the case that a program
-is run with only one operating system thread (e.g. the code in question
-is not thread safe), only one thread of execution is supported: all
-concurrency is lost and must be implemented in userspace, as is the
-case with many asynchronous IO libraries.
+Many languages with multithreading support simply expose OS threads: a
+``thread'' is one and the same as an OS thread.  While simple, this
+approach has costs.  In particular, users of these languages must be
+economical in their use of threads, as most operating systems cannot
+support thousands of simultaneous OS threads.  This is a shame, because
+in many applications the most natural way to \emph{structure} a program
+involves thousands of logical threads: consider a web server, for
+example, which logically has a thread of execution per request.
+Furthermore, when a program cannot be made thread-safe and must be run
+in a single OS thread, no concurrency is available; it must be
+implemented in userspace, as is the case with many asynchronous IO
+libraries.
 
-Instead, we must \emph{multiplex} multiple Haskell threads onto a single
-OS thread.  This requires two adjustments: first, we must be able to
-induce compiled Haskell code to yield to a scheduler, so that another
-Haskell thread can be run.  Preemptive scheduling can sometimes be
-difficult to implement, but for GC'd languages, there is an obvious
-point where all threads get preempted: when they require a garbage
-collection. Thus, we can preempt a thread by setting its heap limit to
-zero, triggering a faux ``heap overflow'' that transfers control to the
-scheduler.\footnote{This can have problems when a thread is in a tight,
-    non-allocating loop; however, better concurrency in such cases can
-be achieved by forcing the compiler to emit heap checks at all function
-prologues, even when no allocation is necessary.}
-Second, we must save the thread's context, e.g. the stack pointer and
-the errno flag, so that it can be restored when the thread is
-rescheduled.  Compiled code can be very efficient about how much other processor
-state must be saved, because it knows what its state is.
-While general purpose C-based coroutine libraries
-must save all registers, a Haskell thread will usually only need
-one or two registers to be saved.\footnote{This is what the fast path \texttt{stg\_gc\_*} functions are for.}
+To support cheap threads, we must \emph{multiplex} multiple Haskell
+threads onto a single OS thread.  A Haskell thread runs until it is
+\emph{preempted}, at which point we suspend its execution and switch to
+running another thread, an operation handled by the \emph{scheduler}.
+How is this preemption implemented?  True preemption is difficult to
+implement, because it implies we can interrupt the execution of code any
+any point, even if it would be leaving some data structures in an
+intermediate state.  So instead, compiled Haskell code yields
+cooperatively\footnote{Cooperative in the sense that the compiled code
+has explicit yield points, not in the sense that the code a programmer
+has to write contains yield points.} at various safe points, where we
+know that the heap is in order and our internal state is saved (to be
+restored on resumption).  These points are in fact when Haskell code
+performs a \emph{heap check} to find out if there is enough free memory
+on the heap to perform an allocation.  These checks automatically are
+safe, because Haskell code already needs to be able to yield to the
+garbage collector, in case we have run out of memory.  This check is
+extended to also yield when a thread has been preempted.\footnote{ In
+practice, preemption is handled by way of a timer signal, which, when
+fired, sets the heap limit to zero, triggering a faux ``heap overflow''
+which the scheduler can then identify as a preempt and not a true
+request for garbage collection.  Thus, the heap check and preemption
+check is a single conditional branch.}
 
 Once we have a way of suspending and resuming threads, the scheduler
-loop is quite simple: maintain a run queue of threads, and repeatedly:
+loop is quite simple. Maintain a \emph{run queue} of threads, and repeatedly:
 
 \begin{enumerate}
     \item Pop the next thread off of the run queue,
-    \item Run the thread until it yields or is preempted,
+    \item Run the thread until it yields,
     \item Check why the thread exited:
         \begin{itemize}
-            \item If it ran out of heap, call the GC and then run the thread again;
-            \item If it ran out of stack, enlarge the stack and then run the thread again;
-            \item If it was preempted, the thread is pushed to the end of the queue;
+            \item If it ran out of heap, call the GC and then run the
+                thread again;
+            \item If it ran out of stack, enlarge the stack and then run
+                the thread again;
+            \item If it was preempted, push the thread to the end of the queue;
             \item If the thread exited, continue.
         \end{itemize}
 \end{enumerate}
 
-Once we have a scheduler loop, we have a simple way of running multiple
-Haskell threads on a \emph{single} OS thread, even when the Haskell
-threads are not thread-safe.
-
 \subsection{Foreign function interface}
 
-While multiplexing is a very attractive solution for supporting
-light-weight concurrency, there are some places when the illusion of ``a
-Haskell thread is simply an operating system thread, but cheaper''
-breaks down.  These cases are especially prevalent when considered with
-the \emph{foreign function interface} (FFI)~\cite{Marlow04extendingthe},
+The benefit of lightweight concurrency is that it offers a way of
+producing threads of control which are indistinguishable from OS
+threads, but are dramatically cheaper.  However, there are some places
+when this illusion does not hold: of particular note is the
+\emph{foreign function interface} (FFI)~\cite{Marlow04extendingthe},
 which permits Haskell code to call out to foreign code not compiled by
-GHC, and vice versa.  One particular problem is as follows: what if an
-FFI call blocks?  As our concurrency is purely cooperative, if the FFI
-call refuses to return to the scheduler, the execution of all other
-threads will grind to a halt.
+GHC, and vice versa.  What happens if an FFI call blocks?  As our
+concurrency is cooperative, if an FFI call refuses to return to the
+scheduler, the execution of all other threads will grind to a halt.
+There isn't really any way around this problem without introducing true
+OS threads to the mix: what we'd like to do is arrange for the blocking
+FFI call and the scheduler to run on different OS threads concurrently.
 
-This problem requires us to decouple OS threads into two parts: the OS
-thread itself (called a \emph{Task} in GHC terminology), and the Haskell
-execution context (called a \emph{Capability}).  The Haskell execution
-context can be thought of as the scheduler loop and is responsible for
-the contents of the run queue: when executing, it is owned by the
-particular OS thread which is running it.  A single-threaded Haskell
-program would have one capability---in this case, the
-capability can be thought as a global lock on the Haskell runtime.
+As it turns out, it is simpler to move the scheduler to a different OS
+thread than the FFI. Thus, we decompose OS threads into two parts: the
+OS thread itself (called a \emph{task} in GHC terminology), and the
+Haskell execution context (called a \emph{capability}).  The Haskell
+execution context contains the scheduler loop and is responsible for the
+contents of the run queue: when executing, it is owned exclusively by
+the particular task (OS thread) which is running it.  A single-threaded
+Haskell program has one capability: the capability is a \emph{global
+lock} on the Haskell runtime.  Now, before a blocking FFI call is made,
+the task releases the capability: if there is another idle \emph{worker
+thread}, it can acquire the now free capability and continue running
+Haskell code.
 
-Decoupling OS threads in this way allows a capability to be run on
-different operating system threads: a blocking FFI call is handled by
-releasing the capability before making the FFI call: if there is another
-idle \emph{worker thread}, it can acquire the now free capability and
-continue running Haskell code.  Why not move the FFI call rather than
-the Haskell execution context?  The key is that we would like to avoid
-an OS level context switch: from the perspective of the OS thread, it
-executes an FFI call by releasing a lock (the capability), running the C
-code and then re-acquiring the lock. \Red{Make sure this is right.}
-
-Thus, we have to modify the scheduler loop as follows:
+When an FFI call returns, we'd like to return the capability to the
+original OS thread. Thus, we have to modify the scheduler loop as follows:
 
 \begin{enumerate}
     \item Check if we need to yield the capability to some other OS thread, e.g. if an FFI call has just finished,
     \item \emph{Run as before.}
 \end{enumerate}
 
-Another problem occurs when the foreign code requires thread local
-state.  Now that capabilities are passed around OS threads, we make no
+Another place where Haskell threads differ from OS threads is thread
+local state.  As capabilities are passed around OS threads, we make no
 guarantee that any given FFI call will be performed on the same OS
-thread.  To accomodate this, Haskell introduces the concept of a
-\emph{bound thread}, which is a thread which always runs on the same
-operating system thread.  GHC also calls these \emph{in-calls}, due to
-the fact that external code which calls into Haskell must be bound: if
-it makes the Haskell code calls out via the FFI again, the inner and
-outer C code may rely on the same thread local state.
+thread as the previous FFI call.  To accomodate Haskell threads which
+rely on thread-local state, Haskell introduces a \emph{bound thread},
+which binds a Haskell thread to a fresh OS thread.\footnote{GHC
+    also calls these \emph{in-calls}, due to the fact that external code
+    which calls into Haskell must be bound: if it makes the Haskell code
+calls out via the FFI again, the inner and outer C code may rely on the
+same thread local state.}
 
-How can we support bound threads?  A simple scheme is to give a bound thread
-an OS thread and forbid any other thread from using it. However, we can
-do better, at the cost of a little more complexity:
+How can we support bound threads?  A simple scheme is to give each bound
+thread its own OS thread.  However, if we have only one capability, we
+need to coordinate these new OS threads so that only one is running
+Haskell code at a time.  We can do this by, once again, passing the
+capability to whichever OS thread truly needs to run the bound thread:
 
 \begin{enumerate}
     \item \emph{Check if we need to yield the capability to some other OS thread, e.g. if an FFI call has just finished,}
@@ -141,15 +145,16 @@ do better, at the cost of a little more complexity:
     \item \emph{Run as before.}
 \end{enumerate}
 
-While the dance of capabilities from task to task is somewhat intricate,
+While the movement of capabilities from task to task is somewhat intricate,
 it imposes no overhead when bound threads are not used.
 
 \subsection{Load balancing}
 
-Assuming that the compiled Haskell code is thread safe~(see Section~\ref{sec:sync}), it is now
-very simple to have the scheduler loop run on multiple OS threads:
-allocate multiple capabilities!  Each OS thread in possession of a capability
-runs the scheduler loop, and everything works the way you'd expect.
+Assuming that the compiled Haskell code is thread safe~(see
+Section~\ref{sec:sync}), it is now very simple to parallelize execution:
+allocate multiple capabilities!  Each OS thread in possession of a
+capability runs the scheduler loop, and everything works the way you'd
+expect.
 
 There is one primary design choice: should each capability have its own
 run queue, or should there be a single global run queue?  A global run
@@ -172,34 +177,43 @@ queues.
 
 \subsection{Sparks}
 
-Up until now, the threads we have discussed were explicitly asked for
-by the user.  In some cases, the user will only have one thread (because
-their application does not need to be concurrent), in which case extra
-cores will be unused.  Is there any way we can take advantage of extra
-capacity?
+\emph{Sparks}~\cite{Marlow2009} are a mechanism for speculative parallel computation.
+When a program is not utilizing all of its CPUs, the other CPUs can be
+reallocated to evaluate thunks that the programmer indicated are likely
+to be needed in the future.  These units of work are called sparks, and
+they offer a mechanism for cheap, deterministic parallelism---in contrast to
+Haskell threads, which are more expensive and nondeterministic.
 
-Haskell takes advantage of pure lazy evaluation to offer \emph{sparks},
-which are extremely light-weight threads with the express purpose of
-evaluating a thunk to head normal form.  Because thunks do not have
-side effects, it is safe to evaluate them speculatively: a spark may
-or may not be evaluated, depending on whether or not there are idle capabilities.
+The ability to speculatively evaluate thunks---a spark is not guaranteed
+to be evaluated---comes from the fact that thunks encapsulate pure code
+and have no side effects.  Furthermore, as thunk update is thread safe
+(Section~\ref{sec:sync}), they provide a natural mechanism of communicating
+the result of a computation back to the thread that requested it.
 
-Since sparks are even lighter-weight than threads, they are represented
-separately and stored in \emph{spark pools}.  When a capability decides
-it has no work to do, it creates a \emph{spark thread}, which repeatedly
-attempts to retrieve a spark from the capability's spark pool and
-evaluate it.  If the capability receives any real work (e.g. a thread
-unblocks), it immediately declares that there are no more sparks to
-evaluate so that the spark thread exits.
+Given thread-safe thunks, the implementation of sparks is quite simple:
+when a computation is sparked, it is stored in a \emph{spark pool}
+associated with a capability.  When a capability has no work to do (e.g.
+its run queue is empty), it creates a \emph{spark thread}, which
+repeatedly attempts to retrieve a spark from the capability's spark pool
+and evaluate it.  Thunk update ensures the results get propagated back
+to the main thread. If the capability receives any real work, it
+immediately terminates the spark thread.
 
 Whereas threads rarely need to be load balanced, sparks frequently need
-to be migrated, as the capability that is generating
-sparks is the one that also is doing real work.  Sparks are balanced using
-bounded work-stealing queues~\XXX, where oldest sparks are stolen first.
-Additionally, many sparks will end up never being evaluated: these sparks
-are \emph{fizzled} and should be garbage collected. \Red{Indeed, the garbage
-collector is responsible for taking fizzled sparks and removing them from the
-spark pool... how does this work}
+to be migrated, as the capability that is generating sparks is likely to
+be the one that is also doing real work.  Sparks are balanced using
+bounded work-stealing queues~\cite{Arora:1998:TSM:277651.277678,Hendler2005}, where a spark thread goes and steals
+sparks from other threads when it has none to execute.
+
+One important optimization for sparks is removing sparks which will not
+contribute any useful parallelism.  For example, if the spark is
+evaluated in the main thread before a spark thread gets around to it,
+the spark is \emph{fizzled} and should be removed from the spark pool.
+Additionally, if a spark's thunk has no references to it (i.e. is dead),
+then the result cannot possibly have an impact on program execution and
+it should also be pruned.  It is relatively easy to check for both of
+these conditions in the garbage collector, by traversing the spark pool
+and checking if the spark points to a thunk that was successfully evacuated.\footnote{An alternate design is to have sparks be GC roots, so that an outstanding spark keeps its data alive. While this is convenient for the implementation of \emph{parallel strategies}, it can result in space leaks, and GHC no longer uses this strategy.}
 
 \subsection{MVars}
 
@@ -217,7 +231,7 @@ its contents are ignored.
 The blocking behavior is the most interesting aspect of MVars:
 ordinarily, one would have to implement this functionality using a
 condition variable.  However, because our Haskell threads are not
-operating system threads, we can do something much more light-weight:
+operating system threads, we can do something much more lightweight:
 when a thread realizes it needs to block, it simply adds itself to a
 \emph{blocked threads queue} corresponding to the MVar.  When another
 thread fills in the MVar, it can check if there is a thread on the
@@ -440,7 +454,7 @@ upon a race.
 
 \subsection{Summary}
 
-Haskell \emph{threads} are light-weight threads of execution which
+Haskell \emph{threads} are lightweight threads of execution which
 multiplex onto multiple CPU cores.  Each core has a \emph{Haskell
 execution context} which contains a scheduler for running these threads;
 in order to handle FFI calls execution contexts can migrate from core to
