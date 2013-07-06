@@ -218,15 +218,14 @@ and checking if the spark points to a thunk that was successfully evacuated.\foo
 \subsection{MVars}
 
 Haskell offers a variety of ways for Haskell threads to interact with
-each other (MVars, asynchronous exceptions, STM, even lazy evaluation).
-We now describe how to implement MVars, the simplest form of
-synchronized communication available to Haskell threads.  An MVar is a mutable
-location that may be empty.  There are two operations which operate on
-an MVar: \verb|takeMVar|, which blocks until the location is non-empty,
-then reads and returns the value, leaving the location empty, and
-\verb|putMVar|, which dually blocks until the location is empty, then
-writes its value into location.  An MVar can be thought of as a lock when
-its contents are ignored.
+each other.  We now describe how to implement MVars, the simplest form
+of synchronized communication available to Haskell threads.  An MVar is
+a mutable location that may be empty.  There are two operations which
+operate on an MVar: \verb|takeMVar|, which blocks until the location is
+non-empty, then reads and returns the value, leaving the location empty,
+and \verb|putMVar|, which dually blocks until the location is empty,
+then writes its value into location.  An MVar can be thought of as a
+lock when its contents are ignored.
 
 The blocking behavior is the most interesting aspect of MVars:
 ordinarily, one would have to implement this functionality using a
@@ -252,19 +251,19 @@ a blocked thread is deadlocked and terminate it.
 MVars are a cooperative form of communication, where a thread must
 explicitly opt-in to receive messages.  Asynchronous
 exceptions~\cite{Marlow:2001:AEH:378795.378858}, on the other hand,
-permit threads to induce an exception in another thread
-without its cooperation.  Asynchronous exceptions are much more
-difficult to program with than their synchronous brethren: as a signal can
-occur at any point in a program's execution, the program must be careful
-to register handlers which ensure that any resources are released and
-invariants are preserved.  In \emph{pure} functional programs, this requirement
-is easier to fulfill, as pure code can always be safely aborted.  When
-asynchronous exceptions are available, however, they are useful
-in a variety of cases, including timing out long running computation,
-aborting speculative computation and handling user interrupts.
+permit threads to induce an exception in another thread without its
+cooperation.  Asynchronous exceptions are much more difficult to program
+with than their synchronous brethren: as a signal can occur at any point
+in a program's execution, the program must be careful to register
+handlers which ensure that any resources are released and invariants are
+preserved.  In \emph{pure} functional programs, this requirement is
+easier to fulfill, as pure code can always be safely aborted.
+Asynchronous exceptions are quite useful in a variety of situations,
+including timing out long running computation, aborting speculative
+computation and handling user interrupts.
 
 Triggering an asynchronous exception is relatively simple with
-preemptive scheduling: preempt the target thread back to the scheduler,
+preemptive scheduling: force the target thread back to the scheduler,
 at which point the scheduler can introduce the exception and walk up the
 stack, much in the same way a normal exception would be handled.  In
 case a thread is operating in a sensitive region, an exception masking
@@ -292,21 +291,22 @@ code could have simply been unlucky: when someone else asks for the same
 computation, we should simply resume where we left off.  Thus, we
 instead \emph{freeze} the state of evaluation by saving the current
 stack into the thunk.~\cite{Reid1999}  This involves walking up the stack
-and perform the following operations when we encounter an update frame:
+and performing the following operations when we encounter an update frame:
 
 \begin{enumerate}
-    \item Allocating a new \verb|AP_STACK| closure which contains the
-        contents of the stack above the frame, and overwriting the
-        old thunk\footnote{Possibly a black hole.} with a pointer to this closure,
+    \item Allocate a new closure (called an \verb|AP_STACK| closure, for
+        ``apply stack'') which contains the contents of the stack above
+        the frame, and overwriting the old thunk\footnote{Possibly a
+        black hole.} with a pointer to this closure,
     \item Truncate the stack up to and including the update frame, and
-    \item Pushing a pointer to the new \verb|AP_STACK| closure to the stack.
+    \item Push a pointer to the new \verb|AP_STACK| closure onto the stack.
 \end{enumerate}
 
-When another thread evaluates one of these suspended thunks,
-\verb|AP_STACK| pushes the frozen stack onto the current stack, thus
-resuming the computation.  The top of the new stack may point to
-yet another suspended thunk, thus repeating the process until we
-have reached the point of the original execution. \Red{This is probably not understandable}
+The result is a chain of \verb|AP_STACK| closures, where the top of each
+frozen stack links to the next frozen stack.  When another thread
+evaluates an \verb|AP_STACK| closure (intending to evaluate the thunk),
+it pushes the frozen stack onto the current stack, thus resuming the
+computation.
 
 \subsection{STM}
 
