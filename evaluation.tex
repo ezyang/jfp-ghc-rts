@@ -45,15 +45,7 @@ We now consider each of these constructs in turn.
 
 Heap allocation is of central importance to Haskell programs: most data
 values, function values, and thunks are all allocated on the heap.  These objects are
-all referred to collectively as \emph{closures}.  All of these heap
-objects are represented uniformly, with a \emph{header}, which indicates
-what kind of object the data is, and the \emph{payload}, which contains
-the actual data for an object (e.g. free variables for function values
-and thunks, or fields for data values).  The header points to an
-\emph{info table}, which provides more information about what kind of
-object the closure is, what code is associated with the object and what
-the layout of the payload is (e.g. what fields are pointers.)
-\Red{Figure}
+all referred to collectively as \emph{closures}.  \Red{Figure}
 
 An important optimization is the \emph{let-no-escape} binding.  True
 to its name, let-no-escape indicates that the contents of the variable

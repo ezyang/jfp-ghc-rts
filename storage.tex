@@ -68,9 +68,29 @@ Thus, the descriptors of blocks of a megablock are instead organized together
 in the first block of a megablock; some care is taken to ensure that the
 runtime can efficiently compute the block descriptor of any given block.
 
-\subsection{Roots}
+\subsection{Memory layout}
 
-\Red{Talk about the stack and when GC can run}
+Before we can discuss the garbage collector proper, we have to describe
+the layout of the data that is to be garbage collector.  GHC has a uniform
+representation for objects on the heap with a \emph{header}, which indicates
+what kind of object the data is, and a \emph{payload}, which contains
+the actual data for an object (e.g. free variables for function values
+and thunks, or fields for data values).  The header points to an
+\emph{info table}, which provides more information about what kind of
+object the closure is, what code is associated with the object and what
+the layout of the payload is (e.g. what fields are pointers.)  The info
+table also contains the code associated with executing an object.
+
+The presence of info tables makes it easy for the garbage collector to
+determine what other closures on the heap an object may reference, as it
+says which fields in the payload are pointers.  Essentially everything
+that the GC touches has an info table, including the stack frames (each
+block of compiled code receives its own info table.)  In particular,
+this makes calculating the \emph{roots} (base objects which are always
+considered reachable) of the application much simpler: at the beginning
+of any block of code, the info table and registers (which known and
+saved by the code itself) constitute all of the pointers in use,
+allowing us to accurately perform GC.
 
 \subsection{Generational garbage collection}
 
@@ -87,13 +107,13 @@ promotion occurs by simply copying the object into the \emph{to-space},
 a process called \emph{evacuation}.  Evacuated objects are subsequently
 \emph{scavenged} to find what objects they refer to, so they can be evacuated as well.
 
-\SM{We probably shouldn't use the terms ``evacuate'' and
-  ``scavenge'', since I think the GHC GC uses them inconsistently with
-  the literature. (TODO: check).}
+%   \SM{We probably shouldn't use the terms ``evacuate'' and
+%     ``scavenge'', since I think the GHC GC uses them inconsistently with
+%     the literature. (TODO: check).}
 
-\Red{EZY: I think, probably, we should just use these terms, since the literature
-doesn't really have a snappy name for "copy to to-space" and "scan for pointers",
-and I use these terms a lot later on.}
+%   \Red{EZY: I think, probably, we should just use these terms, since the literature
+%   doesn't really have a snappy name for "copy to to-space" and "scan for pointers",
+%   and I use these terms a lot later on.}
 
 The efficacy of generational collection hinges on the ``generational
 hypothesis'', which states that data that has been recently allocated is
