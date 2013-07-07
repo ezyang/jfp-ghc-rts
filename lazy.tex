@@ -1,28 +1,41 @@
 \section{Lazy evaluation}
 
+Lazy evaluation is a core part of the Haskell language, and
+it should not be surprising that a nontrivial part the runtime
+system.  Central to lazy evaluation is the \emph{thunk}, which
+when evaluated is replaced with the fully evaluated result,
+thus memoizing the computation.
 
-\subsection{Tagless: Lazy evaluation} \label{sec:lazy}
+%   Unusually, the info table also contains \emph{code} for the object: any
+%   object can be ``entered'' (by jumping to the code in the infotable) in
+%   order to evaluate it.  This is perhaps the most important design
+%   decision in STG: it prescribes a uniform data representation for both
+%   fully evaluated data values (constructors and functions) and unevaluated
+%   thunks---referred to collectively as \emph{closures}.
 
-Unusually, the info table also contains \emph{code} for the object: any
-object can be ``entered'' (by jumping to the code in the infotable) in
-order to evaluate it.  This is perhaps the most important design
-decision in STG: it prescribes a uniform data representation for both
-fully evaluated data values (constructors and functions) and unevaluated
-thunks---referred to collectively as \emph{closures}.  In the original
-design of the STG, all code wanting to access a field in a data
-structure first entered the closure and upon return would receive the
-values of the data structure (a \emph{vectored return}).  The lack of
-any check whether or not a thunk was evaluated or not (an obvious
-alternative implementation strategy) is behind the ``tagless`` in STG's
-name.
+%   In the original
+%   design of the STG, all code wanting to access a field in a data
+%   structure first entered the closure and upon return would receive the
+%   values of the data structure (a \emph{vectored return}).  The lack of
+%   any check whether or not a thunk was evaluated or not (an obvious
+%   alternative implementation strategy) is behind the ``tagless`` in STG's
+%   name.
 
-\SM{We don't do vectored returns, since GHC 4.0. Also
-  return-in-registers, which you might also find menioned in the
-  original STG paper, was removed in favour of unboxed tuples.}
+%   \SM{We don't do vectored returns, since GHC 4.0. Also
+%     return-in-registers, which you might also find menioned in the
+%     original STG paper, was removed in favour of unboxed tuples.}
 
-\SM{Tagless is a bit debatable these days.  We have tags in pointers
-  (pointer tagging).  Also the code pointer for a function closure is
-  the entry code for the function (not the ``eval'' code).}
+%   \SM{Tagless is a bit debatable these days.  We have tags in pointers
+%     (pointer tagging).  Also the code pointer for a function closure is
+%     the entry code for the function (not the ``eval'' code).}
+
+How is a thunk evaluated?  One could imagine a scheme where any
+generated code which evaluated a thunk would be responsible for writing
+back the true value.  However, GHC uses a \emph{self-updating} model,
+where one simply jumps to the entry code associated with a thunk, and that
+entry code is responsible for updating the thunk.  This is achieved by
+pushing an \emph{update frame} on the stack, which will eventually
+take the value computed and write it to the thunk.
 
 The fact that objects are always entered is an extremely helpful layer
 of indirection which is used for a variety of purposes by the runtime.
@@ -31,15 +44,16 @@ true value to the old memory location so the computation is not
 repeated.  If the new value is larger than the thunk, it must be placed
 in new heap memory and the old thunk replaced with an \emph{indirection}
 pointer pointing to the new value.  An indirection object, then, simply
-jumps to the code of the indirectee!  This flexibility is useful for a
-number of other exceptional conditions, especially in the case of
-concurrency.
+jumps to the code of the indirectee!  Or, if an object is already evaluated,
+then its entry code is trivial.  This flexibility is useful for a
+number of other exceptional conditions, as we will see below.
 
-Unfortunately, code compiled this way performs a lot of indirect jumps,
-and modern branch prediction units on processors typically perform very
-poorly under such control flow.  This might suggest that this data
-representation is quite expensive and of little interest to implementors
-of non-lazy languages.  Fortunately, modern GHC implements a
+\section{Dynamic pointer tagging}
+
+Unfortunately, if we always jump to the entry code of a value, even
+if it may already be evaluated, we will be performing a lot of indirect jumps,
+which modern branch prediction units on processors perform
+poorly under.  Modern GHC implements a
 \emph{dynamic pointer tagging} scheme~\XXX{} which, in many cases,
 eliminates the need to perform an indirect jump.  This scheme works by
 using the lower order bits (two bits in a 32-bit machine, and three bits
@@ -51,26 +65,20 @@ We think that this representation is well worth considering even for
 non-lazy-by-default languages.  In the case of data types with multiple
 constructors, pointer tagging enables us to support efficient case
 analysis of user-defined types \emph{without a memory
-dereference}---only the tag bit must be consulted.  And, to reiterate,
-the added flexibility the indirect jumps will greatly aid us later in
-other components of the runtime system.
+dereference}---only the tag bit must be consulted.  For thunks,
+it is absolutely essential!
 
-\subsection{Synchronization}
+\subsection{Synchronization} \label{sec:sync}
 
-In previous sections, we asserted that execution of Haskell threads
-could be made parallel, assuming that the compiled Haskell code was
-thread-safe.  As any developer who has needed to write thread-safe code
-can attest, this is a tall order!
+In the section on concurrency and parallelism, we asserted that
+execution of Haskell threads could be made parallel, assuming that the
+compiled Haskell code was thread-safe.  As any developer who has needed
+to write thread-safe code can attest, this is a tall order!
+Fortunately, much of this work is already done: both explicit interthread
+communication and pure code can be synchronized with little fuss.
 
-Fortunately, much of this work is already done.  We have already seen various mechanisms
-for explicit interthread communication, which are all designed with
-concurrent execution in mind:  synchronizing them is a relatively simple
-task.  Furthermore, the vast majority of Haskell code is pure, and needs no
-synchronization.
-
-However, there is one major feature we have to worry about: lazy
-evaluation.  Recall that after a thunk has been evaluated, its value on
-the heap must be replaced with the fully evaluated value. Multiple
+Lazy evaluation, however, poses a unique challenge.  Updating a thunk
+with its new value constitutes mutation on shared state: multiple
 threads could evaluate a thunk in parallel, so na\"ively, these writes
 must be synchronized.  This is extremely costly: Haskell programs do a
 lot of thunk updates!

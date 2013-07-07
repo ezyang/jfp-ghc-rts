@@ -184,11 +184,13 @@ to be needed in the future.  These units of work are called sparks, and
 they offer a mechanism for cheap, deterministic parallelism---in contrast to
 Haskell threads, which are more expensive and nondeterministic.
 
-The ability to speculatively evaluate thunks---a spark is not guaranteed
-to be evaluated---comes from the fact that thunks encapsulate pure code
-and have no side effects.  Furthermore, as thunk update is thread safe
-(Section~\ref{sec:sync}), they provide a natural mechanism of communicating
-the result of a computation back to the thread that requested it.
+Sparks take advantage of Haskell's lazy evaluation (Section~\ref{sec:lazy}) to provide a source
+of units of work for sparking.  The ability to speculatively evaluate
+thunks---a spark is not guaranteed to be evaluated---comes from the fact
+that thunks encapsulate pure code and have no side effects.
+Furthermore, as thunk update is thread safe (Section~\ref{sec:sync}),
+they provide a natural mechanism of communicating the result of a
+computation back to the thread that requested it.
 
 Given thread-safe thunks, the implementation of sparks is quite simple:
 when a computation is sparked, it is stored in a \emph{spark pool}
@@ -281,17 +283,21 @@ that is used when a thunk is replaced with its true value, and modifying
 queue handling code to skip over indirections; because blocking queues
 live on the heap, the garbage collector will clean it up for us in the end.}
 
+\Red{This explanation probably still needs a little work}
+
 The second difference is how lazy evaluation is handled. When pure code
 raises an exception, referential transparency demands that any other
 execution of that code will result in the same exception.  Thus, while
-we are walking up the stack, when we see update frames \Red{link back},
-we replace the thunk it would have updated with a new thunk that always
-the exception.  However, in the case of an asynchronous exception, the
-code could have simply been unlucky: when someone else asks for the same
-computation, we should simply resume where we left off.  Thus, we
-instead \emph{freeze} the state of evaluation by saving the current
-stack into the thunk.~\cite{Reid1999}  This involves walking up the stack
-and performing the following operations when we encounter an update frame:
+we are walking up the stack, when we see an \emph{update frame}, which
+is a continuation responsible for taking a value and saving it to the
+thunk (overwriting it), we go ahead and instead overwrite the thunk with a new
+thunk that always throws the exception.  However, in the case of an
+asynchronous exception, the code could have simply been unlucky: when
+someone else asks for the same computation, we should simply resume
+where we left off.  Thus, we instead \emph{freeze} the state of
+evaluation by saving the current stack into the thunk.~\cite{Reid1999}
+This involves walking up the stack and performing the following
+operations when we encounter an update frame:
 
 \begin{enumerate}
     \item Allocate a new closure (called an \verb|AP_STACK| closure, for
@@ -330,60 +336,6 @@ a large inefficiency that plagues many other STM implementation.
 \Red{How is it implemented}
 
 \Red{Maybe move this below messages and white holes}
-
-\subsection{Lazy evaluation}
-
-Unusually, the info table also contains \emph{code} for the object: any
-object can be ``entered'' (by jumping to the code in the infotable) in
-order to evaluate it.  This is perhaps the most important design
-decision in STG: it prescribes a uniform data representation for both
-fully evaluated data values (constructors and functions) and unevaluated
-thunks---referred to collectively as \emph{closures}.  In the original
-design of the STG, all code wanting to access a field in a data
-structure first entered the closure and upon return would receive the
-values of the data structure (a \emph{vectored return}).  The lack of
-any check whether or not a thunk was evaluated or not (an obvious
-alternative implementation strategy) is behind the ``tagless`` in STG's
-name.
-
-\SM{We don't do vectored returns, since GHC 4.0. Also
-  return-in-registers, which you might also find menioned in the
-  original STG paper, was removed in favour of unboxed tuples.}
-
-\SM{Tagless is a bit debatable these days.  We have tags in pointers
-  (pointer tagging).  Also the code pointer for a function closure is
-  the entry code for the function (not the ``eval'' code).}
-
-The fact that objects are always entered is an extremely helpful layer
-of indirection which is used for a variety of purposes by the runtime.
-For example, when a thunk finishes evaluation, we need to write back the
-true value to the old memory location so the computation is not
-repeated.  If the new value is larger than the thunk, it must be placed
-in new heap memory and the old thunk replaced with an \emph{indirection}
-pointer pointing to the new value.  An indirection object, then, simply
-jumps to the code of the indirectee!  This flexibility is useful for a
-number of other exceptional conditions, especially in the case of
-concurrency.
-
-Unfortunately, code compiled this way performs a lot of indirect jumps,
-and modern branch prediction units on processors typically perform very
-poorly under such control flow.  This might suggest that this data
-representation is quite expensive and of little interest to implementors
-of non-lazy languages.  Fortunately, modern GHC implements a
-\emph{dynamic pointer tagging} scheme~\XXX{} which, in many cases,
-eliminates the need to perform an indirect jump.  This scheme works by
-using the lower order bits (two bits in a 32-bit machine, and three bits
-in a 64-bit machine) in order to encode whether or not pointer is
-already evaluated, and if it is, what the tag of the constructor is.
-When the tag bit is absent, user code will enter the closure, as before.
-
-We think that this representation is well worth considering even for
-non-lazy-by-default languages.  In the case of data types with multiple
-constructors, pointer tagging enables us to support efficient case
-analysis of user-defined types \emph{without a memory
-dereference}---only the tag bit must be consulted.  And, to reiterate,
-the added flexibility the indirect jumps will greatly aid us later in
-other components of the runtime system.
 
 \subsection{Messages and white holes}
 

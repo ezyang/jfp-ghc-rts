@@ -94,11 +94,11 @@ allowing us to accurately perform GC.
 There are many possible methods by which objects on the heap can be
 represented (for example, in place of info tables, pointer tagging can
 be used to distinguish non-pointers from pointers).  However, in order
-to support lazy evaluation (Section~\ref{sec:lazy}), headers have
+to support lazy evaluation, headers have
 another important function, which is that they double as pointers to the
 \emph{entry code} responsible for evaluating a thunk.  The ability to \emph{replace}
 one header with another and have the behavior of a thunk change
-correspondingly is tremendously useful (Section~\ref{sec:blackhole}).
+correspondingly is tremendously useful.  The issues are discussed in Section~\ref{sec:lazy}.
 
 \subsection{Generational garbage collection}
 
