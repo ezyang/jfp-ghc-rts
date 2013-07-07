@@ -12,53 +12,65 @@ important role to play in the design of components of the runtime system
 brief explanation of some of the most important aspects of the
 \emph{Spineless Tagless G-machine} (STG), GHC's core execution model.
 
-\subsection{G-machine}
+\subsection{STG}
 
 How does a Haskell program run?  This is not a straightforward question
 to answer, because a compiled Haskell program is not run directly: it is
-transformed from Haskell into an intermediate representation called
-Core, optimized, and transformed into another intermediate
-representation (STG) before any code is generated.  Describing how
-Haskell is desugared and what these optimizations are is out of scope
-for this paper.  We have to discuss 
+desugared into an intermediate representation called Core, optimized,
+and transformed into another intermediate representation (STG) before
+any code is generated.  Describing how Haskell is desugared and
+optimized is out of scope for this paper.  Thus, we cannot directly talk
+about how Haskell runs, rather, we can only talk about a abstract
+machine language which resembles Haskell, but is designed to be easy to
+generate code for.
 
-This intermediate representation is the STG, which has the benefits of
-being both a functional language and having a clear operational reading.
-
-What are the basic operations that STG code supports?  It 
+This abstract machine is the \emph{Spineless Tagless G-machine}, and it
+is a functional language.  Like Haskell, it has function application,
+literals, constructors, primitive operations, let-bindings amd
+case-expressions.  However, it imposes a few simplifying restrictions
+(for example, there are no lambda literals: they must be top-level or
+let-bound before use).  These restrictions allow us to make four
+important equivalences between language and operation:
 
 \begin{itemize}
-    \item Function application,
-    \item Literals,
-    \item Constructor application (saturated),
-    \item Primitive operations (saturated),
-    \item Evaluation of expressions and case-split of the result,
-    \item Heap allocation (let) of closures (thunks or functions) and constructors,
-    \item Let-no-escape,
+    \item \emph{Let expressions} are \emph{heap allocation},
+    \item \emph{Function application} is a \emph{tail call},
+    \item \emph{Case expressions} are \emph{evaluation}, and
+    \item \emph{Constructor application} is a \emph{return to continuation}.
 \end{itemize}
+
+We now consider each of these constructs in turn.
+
+\subsection{Let-binding and heap allocation}
+
+Heap allocation is of central importance to Haskell programs: most data
+values, function values, and thunks are all allocated on the heap.  These objects are
+all referred to collectively as \emph{closures}.  All of these heap
+objects are represented uniformly, with a \emph{header}, which indicates
+what kind of object the data is, and the \emph{payload}, which contains
+the actual data for an object (e.g. free variables for function values
+and thunks, or fields for data values).  The header points to an
+\emph{info table}, which provides more information about what kind of
+object the closure is, what code is associated with the object and what
+the layout of the payload is (e.g. what fields are pointers.)
+\Red{Figure}
+
+An important optimization is the \emph{let-no-escape} binding.  True
+to its name, let-no-escape indicates that the contents of the variable
+do not escape from the scope it was allocated in.  Because 
+
+\subsection{Function application and tail calls}
+
+%   \begin{itemize}
+%       \item There are no literal lambdas; instead, a lambda must either be lifted to the top-level of the program or be allocated via a let-binding.  Requiring this makes \emph{heap allocation} explicit, because a heap allocation can only occur when a let-binding occurs.
+%       \item Constructor application and primitive operations must be \emph{saturated}, that is, they must be provided with all of the arguments they expect.  Ordinarily, these operations are curried, so partially applied forms are OK; in STG, they are wrapped in lambdas.
+%       \item Evaluation of expressions and case-split of the result,
+%       \item Heap allocation (let) of closures (thunks or functions) and constructors,
+%       \item Let-no-escape,
+%   \end{itemize}
 
 
 \subsection{(Untitled)}
-
-What does compiled Haskell code do?  Haskell is a high-level language,
-and thus the executable code produced by a Haskell compiler bears little
-resemblance to the code that was originally written.
-
-Fortunately, GHC does have a \emph{purely
-functional} intermediate language, which does have an operational
-reading: this language is the \emph{Spineless Tagless
-G-machine}.~\cite{PeytonJones1992}.
-
-STG is 
-
-\begin{itemize}
-    \item Function application: tail call (direct jump)
-    \item Let expression: heap allocation
-    \item Case expression: evaluation of a thunk
-    \item Constructor application: return to continuation
-\end{itemize}
-
-
 
 The fact that all function applications are tail calls is perhaps what
 causes the largest divergence between the runtime execution of Haskell
@@ -67,26 +79,7 @@ a stack frame (e.g. continuation) is always pushed onto the stack; in
 Haskell, we may push zero, one, or more frames on the stack before
 jumping to the function destination.
 
-While there are many details to STG, for which an interested reader
-should consult \cite{PeytonJones1992} and \cite{Marlow2006}, a brief
-overview of the STG will be useful for understanding some of the things
-the runtime system needs to support.  STG is a simple lambda calculus,
-for which the following common operations are given an operational
-reading:
-
-\subsection{Spineless Tagless G-machine}
-
-The Spineless Tagless G-machine (STG) is 
-
 \subsection{Heap representation}
-
-All data on the heap is boxed, represented with a \emph{header}, which
-indicates what kind of object the data is, and the \emph{payload}, which
-contains the actual data for an object.  The header points to an
-\emph{info table}, which provides more information about whether or not
-the object is a thunk, a data constructor or a function, and describes
-the layout of the payload in more detail (e.g. what fields are
-pointers.) \Red{Figure}
 
 \subsection{Spineless: Stack}
 
