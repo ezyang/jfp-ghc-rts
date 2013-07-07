@@ -6,27 +6,39 @@ of the execution model of compiled Haskell code.
 While the execution model of compiled code isn't in the domain of the
 runtime system per se (it is the compiler's responsibility to generate
 code that abides by the various conventions), various parts of the
-execution model (e.g. heap representation, lazy evaluation) have an important
-role to play in the design of components of the runtime system (e.g. the
-garbage collector, concurrency).  In this section, we offer a brief
-explanation of some of the most important aspects of the \emph{Spineless Tagless G-machine} (STG),
-GHC's core execution model.
+execution model (e.g. heap representation, lazy evaluation) have an
+important role to play in the design of components of the runtime system
+(e.g. the garbage collector, concurrency).  In this section, we offer a
+brief explanation of some of the most important aspects of the
+\emph{Spineless Tagless G-machine} (STG), GHC's core execution model.
+
+\subsection{G-machine}
+
+How does a Haskell program run?  This is not a straightforward question
+to answer, because a compiled Haskell program is not run directly: it is
+transformed from Haskell into an intermediate representation called
+Core, optimized, and transformed into another intermediate
+representation (STG) before any code is generated.  Describing how
+Haskell is desugared and what these optimizations are is out of scope
+for this paper.  We have to discuss 
+
+This intermediate representation is the STG, which has the benefits of
+being both a functional language and having a clear operational reading.
+
+What are the basic operations that STG code supports?  It 
+
+\begin{itemize}
+    \item Function application,
+    \item Literals,
+    \item Constructor application (saturated),
+    \item Primitive operations (saturated),
+    \item Evaluation of expressions and case-split of the result,
+    \item Heap allocation (let) of closures (thunks or functions) and constructors,
+    \item Let-no-escape,
+\end{itemize}
 
 
 \subsection{(Untitled)}
-
-Understanding the compiled code of high-level programming languages is
-difficult for multiple reasons.  First, the abstractions offered by the
-high-level language must be compiled down into machine code, which can
-obscure the original intent of the code. Second, these languages will
-typically be compiled with optimizations, such that even when a program
-is written in a direct, low-level style, the optimized executable may be
-substantially different.\footnote{Even optimizing C can obscure the
-resulting executables, as anyone who has tried to use \texttt{gdb} on
-optimized C can attest.}
-
-While there is little we can do about the second problem, once optimizations
-have been applied we can consider how to transform
 
 What does compiled Haskell code do?  Haskell is a high-level language,
 and thus the executable code produced by a Haskell compiler bears little
