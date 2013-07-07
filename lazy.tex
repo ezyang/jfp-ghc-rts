@@ -1,0 +1,143 @@
+\section{Lazy evaluation}
+
+
+\subsection{Tagless: Lazy evaluation} \label{sec:lazy}
+
+Unusually, the info table also contains \emph{code} for the object: any
+object can be ``entered'' (by jumping to the code in the infotable) in
+order to evaluate it.  This is perhaps the most important design
+decision in STG: it prescribes a uniform data representation for both
+fully evaluated data values (constructors and functions) and unevaluated
+thunks---referred to collectively as \emph{closures}.  In the original
+design of the STG, all code wanting to access a field in a data
+structure first entered the closure and upon return would receive the
+values of the data structure (a \emph{vectored return}).  The lack of
+any check whether or not a thunk was evaluated or not (an obvious
+alternative implementation strategy) is behind the ``tagless`` in STG's
+name.
+
+\SM{We don't do vectored returns, since GHC 4.0. Also
+  return-in-registers, which you might also find menioned in the
+  original STG paper, was removed in favour of unboxed tuples.}
+
+\SM{Tagless is a bit debatable these days.  We have tags in pointers
+  (pointer tagging).  Also the code pointer for a function closure is
+  the entry code for the function (not the ``eval'' code).}
+
+The fact that objects are always entered is an extremely helpful layer
+of indirection which is used for a variety of purposes by the runtime.
+For example, when a thunk finishes evaluation, we need to write back the
+true value to the old memory location so the computation is not
+repeated.  If the new value is larger than the thunk, it must be placed
+in new heap memory and the old thunk replaced with an \emph{indirection}
+pointer pointing to the new value.  An indirection object, then, simply
+jumps to the code of the indirectee!  This flexibility is useful for a
+number of other exceptional conditions, especially in the case of
+concurrency.
+
+Unfortunately, code compiled this way performs a lot of indirect jumps,
+and modern branch prediction units on processors typically perform very
+poorly under such control flow.  This might suggest that this data
+representation is quite expensive and of little interest to implementors
+of non-lazy languages.  Fortunately, modern GHC implements a
+\emph{dynamic pointer tagging} scheme~\XXX{} which, in many cases,
+eliminates the need to perform an indirect jump.  This scheme works by
+using the lower order bits (two bits in a 32-bit machine, and three bits
+in a 64-bit machine) in order to encode whether or not pointer is
+already evaluated, and if it is, what the tag of the constructor is.
+When the tag bit is absent, user code will enter the closure, as before.
+
+We think that this representation is well worth considering even for
+non-lazy-by-default languages.  In the case of data types with multiple
+constructors, pointer tagging enables us to support efficient case
+analysis of user-defined types \emph{without a memory
+dereference}---only the tag bit must be consulted.  And, to reiterate,
+the added flexibility the indirect jumps will greatly aid us later in
+other components of the runtime system.
+
+\subsection{Synchronization}
+
+In previous sections, we asserted that execution of Haskell threads
+could be made parallel, assuming that the compiled Haskell code was
+thread-safe.  As any developer who has needed to write thread-safe code
+can attest, this is a tall order!
+
+Fortunately, much of this work is already done.  We have already seen various mechanisms
+for explicit interthread communication, which are all designed with
+concurrent execution in mind:  synchronizing them is a relatively simple
+task.  Furthermore, the vast majority of Haskell code is pure, and needs no
+synchronization.
+
+However, there is one major feature we have to worry about: lazy
+evaluation.  Recall that after a thunk has been evaluated, its value on
+the heap must be replaced with the fully evaluated value. Multiple
+threads could evaluate a thunk in parallel, so na\"ively, these writes
+must be synchronized.  This is extremely costly: Haskell programs do a
+lot of thunk updates!
+
+Once again, our saving grace is purity: as thunks represent pure
+computation, evaluating a thunk twice has no observable effect: both
+evaluations are guaranteed to come up with the same result.  Thus, we
+should be able to keep updates to thunk unsynchronized, at the cost of
+occasional duplication of work when two threads race to evaluate the
+same thunk.
+
+A race can still be harmful, however, if we need to update a thunk in
+multiple steps and the intermediate states are not valid.  In the case
+of a thunk update, we need to both update the header and write down a
+pointer to the result; if we update the header first, then the
+intermediate state is not well-formed (the result field is empty); on
+the other hand, if we update the result field first, we might clobber
+important information in the thunk.  Instead, we leave a blank word in
+every thunk where the result can be written in non-destructively, after
+which the header of the closure can be changed.\footnote{Appropriate
+write barriers must be added to ensure the CPU does not reorder these
+instructions.}
+
+\begin{verbatim}
+word    step 1   step 2   step 3
+   0     THUNK    THUNK      IND \ valid closure
+   1         -   result   result /
+   2   payload  payload  payload <- payload is slop
+\end{verbatim}
+
+\subsection{Black holes} \label{sec:blackhole}
+
+Some thunks take a long time to evaluate: we'd like to avoid duplicating
+their work.  What we would like is for threads to notice when someone is
+working on a thunk, and wait for the result to become available.
+
+The mechanism by which this is implemented is a \emph{black hole}, which
+represents a thunk that is currently being evaluated.  A thunk can be
+\emph{claimed} by overwriting it with a black hole.  Black holes were
+originally proposed as a solution for a space leak that occured in some
+cases of tail calls~\cite{Jones2008}, but they have found their utility
+in a multithreaded setting.  Recall that a thread wishing to evaluate
+a thunk jumps to the entry code; the entry code of a black hole
+places a thread on the blocked queue of the owner the black hole, to
+be woken up when the thunk has been evaluated.\footnote{It is somewhat difficult
+to put a blocked queue on the thunk itself (due to the lack of
+synchronization); instead, GHC uses a per-thread list of black hole
+blockers which is traversed every time a thread finishes updating a
+thunk.}
+
+There are two times when a black hole can be written: it can be \emph{eagerly}
+written as soon as a thunk is evaluated, or it can be \emph{lazily} deferred
+for when a thread has gotten descheduled (and thus the thunk was taking
+a long time to evaluate.)  If a black hole is written eagerly,
+it is on the fast path of thunk updates, and we cannot use
+synchronization.  We call these \emph{eager black holes} (also known as
+\emph{grey holes}), which do not guarantee exclusivity.  Lazy blackholing is done more infrequently, and thus
+we can afford to use a CAS to implement them.\footnote{While multiple
+    threads may have eagerly blackholed a thunk, we guarantee only one
+    thread has lazily blackholed it.  If a thunk \emph{must not} be
+duplicated, it can achieve this by forcing all of its callers to perform
+lazy blackholing
+(\texttt{noDuplicate\#}).  \texttt{unsafePerformIO} uses precisely
+this mechanism in order to avoid duplication of IO effects.}
+
+The upshot is that GHC is able to implement lazy evaluation without any
+synchronization for most thunk updates, applying synchronization
+\emph{only} when it is specifically necessary. The cost of this scheme
+is low: a single extra field in thunk and a (rare) duplication of work
+upon a race.

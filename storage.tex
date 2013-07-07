@@ -78,8 +78,7 @@ the actual data for an object (e.g. free variables for function values
 and thunks, or fields for data values).  The header points to an
 \emph{info table}, which provides more information about what kind of
 object the closure is, what code is associated with the object and what
-the layout of the payload is (e.g. what fields are pointers.)  The info
-table also contains the code associated with executing an object.
+the layout of the payload is (e.g. what fields are pointers.)
 
 The presence of info tables makes it easy for the garbage collector to
 determine what other closures on the heap an object may reference, as it
@@ -91,6 +90,15 @@ considered reachable) of the application much simpler: at the beginning
 of any block of code, the info table and registers (which known and
 saved by the code itself) constitute all of the pointers in use,
 allowing us to accurately perform GC.
+
+There are many possible methods by which objects on the heap can be
+represented (for example, in place of info tables, pointer tagging can
+be used to distinguish non-pointers from pointers).  However, in order
+to support lazy evaluation (Section~\ref{sec:lazy}), headers have
+another important function, which is that they double as pointers to the
+\emph{entry code} responsible for evaluating a thunk.  The ability to \emph{replace}
+one header with another and have the behavior of a thunk change
+correspondingly is tremendously useful (Section~\ref{sec:blackhole}).
 
 \subsection{Generational garbage collection}
 
