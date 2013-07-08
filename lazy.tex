@@ -1,10 +1,45 @@
 \section{Lazy evaluation}
 
-Lazy evaluation is a core part of the Haskell language, and
-it should not be surprising that a nontrivial part the runtime
-system.  Central to lazy evaluation is the \emph{thunk}, which
-when evaluated is replaced with the fully evaluated result,
-thus memoizing the computation.
+%   lazy evaluation: what is it?
+%   implemented using self-update model; this is flexible and reduces code size, but introduces inefficiency
+%   haskell is lazy by default, so it needs to be efficient
+%   some of these techniques applicable to other languages, or general memoizing code
+
+\emph{Lazy evaluation} is an evaluation strategy which delays the
+evaluation of an expression until its result is requested.
+Operationally, an expression does not result in a computation, but
+rather results in the allocation of a \emph{thunk}, which can be forced
+in order to produce the true result of the expression.  This result
+is then written over the thunk, so that future accesses to the thunk
+avoid repeated evaluation.
+
+There are a number of different strategies for implementing lazy
+evaluation.  Their primary difference lies in who is responsible for
+updating the thunk: is it the evaluator of the thunk, or the thunk
+itself?  The former constitutes the \emph{cell model}, where the
+call-sites of thunks check if the thunk is evaluated before calling in
+and write back the result on return; the latter constitutes the
+\emph{self-updating model}, where call-sites unconditionally jump to (or
+\emph{enter}) the thunk, leaving the thunk responsible for updating
+itself.  GHC utilizes a self-updating model, partially a historical
+artifact from when \emph{all} objects on the heap (including data
+constructors) were expected to be evaluated by entering them, and
+because it works well with dynamic pointer tagging
+(Section~\ref{sec:tagging}), which avoids performing the jump for
+evaluated thunks at the cost of a cheap register comparison (no memory
+access).
+
+Most languages give very little thought to the efficient implementation
+of thunks, since they are not a core part of the language.  However,
+Haskell is lazy by default, and thus the speed of thunks is critical to
+the overall performance of most Haskell programs.  As a result, GHC has
+a very efficient implementation of thunks.  This section discusses three
+important aspects of efficient implementation of thunks: how to
+efficiently determine if a thunk is already evaluated
+(Section~\ref{sec:tagging}), how to safely implement thunk update in a
+multithreaded setting (Section~\ref{sec:sync}), and how to avoid
+duplicated work evaluating a thunk when two threads attempt to evaluate
+the same thunk at the same time (Section~\ref{sec:blackhole}).
 
 %   Unusually, the info table also contains \emph{code} for the object: any
 %   object can be ``entered'' (by jumping to the code in the infotable) in
@@ -29,59 +64,52 @@ thus memoizing the computation.
 %     (pointer tagging).  Also the code pointer for a function closure is
 %     the entry code for the function (not the ``eval'' code).}
 
-How is a thunk evaluated?  One could imagine a scheme where any
-generated code which evaluated a thunk would be responsible for writing
-back the true value.  However, GHC uses a \emph{self-updating} model,
-where one simply jumps to the entry code associated with a thunk, and that
-entry code is responsible for updating the thunk.  This is achieved by
-pushing an \emph{update frame} on the stack, which will eventually
-take the value computed and write it to the thunk.
+\section{Dynamic pointer tagging} \label{sec:tagging}
 
-The fact that objects are always entered is an extremely helpful layer
-of indirection which is used for a variety of purposes by the runtime.
-For example, when a thunk finishes evaluation, we need to write back the
-true value to the old memory location so the computation is not
-repeated.  If the new value is larger than the thunk, it must be placed
-in new heap memory and the old thunk replaced with an \emph{indirection}
-pointer pointing to the new value.  An indirection object, then, simply
-jumps to the code of the indirectee!  Or, if an object is already evaluated,
-then its entry code is trivial.  This flexibility is useful for a
-number of other exceptional conditions, as we will see below.
+In the na\"ive self-updating model, we always perform an indirect jump
+to the entry code of a heap object before accessing its fields.  If the
+object is already a data constructor, this jump returns immediately as a
+no-op.  Unfortunately, these indirect jumps are poorly supported by
+modern branch prediction units on processors.  Ideally, we would like
+to avoid making a jump at all when it is unnecessary.
 
-\section{Dynamic pointer tagging}
+Modern GHC implements a \emph{dynamic pointer tagging}
+scheme~\cite{Marlow2007} to provide information on whether or not a heap
+object is evaluated or not.  This scheme works by using the lower order
+bits (two bits in a 32-bit machine, and three bits in a 64-bit machine)
+in order to record whether or not the contents of a pointer are already
+evaluated.  If the lower order bits are zero, then the pointer is
+unevaluated and we need to enter the closure.  Otherwise, these bits can
+be used to record which constructor the object is, e.g. for booleans, a
+tag of 1 would indicate \verb|False| and tag of 2 would indicate
+\verb|True|.  Pointer tags are easily added to an object when it is
+initially allocated (the tag never changes, because data on the heap is
+immutable) and must be preserved by the garbage collector.
 
-Unfortunately, if we always jump to the entry code of a value, even
-if it may already be evaluated, we will be performing a lot of indirect jumps,
-which modern branch prediction units on processors perform
-poorly under.  Modern GHC implements a
-\emph{dynamic pointer tagging} scheme~\XXX{} which, in many cases,
-eliminates the need to perform an indirect jump.  This scheme works by
-using the lower order bits (two bits in a 32-bit machine, and three bits
-in a 64-bit machine) in order to encode whether or not pointer is
-already evaluated, and if it is, what the tag of the constructor is.
-When the tag bit is absent, user code will enter the closure, as before.
-
-We think that this representation is well worth considering even for
-non-lazy-by-default languages.  In the case of data types with multiple
-constructors, pointer tagging enables us to support efficient case
-analysis of user-defined types \emph{without a memory
-dereference}---only the tag bit must be consulted.  For thunks,
-it is absolutely essential!
+Pointer tagging is well worth considering even for non-lazy-by-default
+languages.  Because case analysis on a tagged pointer can be done
+without any memory accesses, tagged pointers enable user defined data
+types to be nearly as efficient as built-in types (e.g. booleans), while
+at the same time allowing for fields in the constructors to store extra
+information.  And of course, they are essential for thunks!
 
 \subsection{Synchronization} \label{sec:sync}
 
-In the section on concurrency and parallelism, we asserted that
-execution of Haskell threads could be made parallel, assuming that the
-compiled Haskell code was thread-safe.  As any developer who has needed
-to write thread-safe code can attest, this is a tall order!
-Fortunately, much of this work is already done: both explicit interthread
-communication and pure code can be synchronized with little fuss.
+%   In the section on concurrency and parallelism, we asserted that
+%   execution of Haskell threads could be made parallel, assuming that the
+%   compiled Haskell code was thread-safe.  As any developer who has needed
+%   to write thread-safe code can attest, this is a tall order!
+%   Fortunately, much of this work is already done: both explicit interthread
+%   communication and pure code can be synchronized with little fuss.
 
-Lazy evaluation, however, poses a unique challenge.  Updating a thunk
-with its new value constitutes mutation on shared state: multiple
-threads could evaluate a thunk in parallel, so na\"ively, these writes
-must be synchronized.  This is extremely costly: Haskell programs do a
-lot of thunk updates!
+We now turn our attention to how thunks are updated.  Updating a thunk
+with its new value constitutes mutation on shared state, thus, thunks
+update is an important obstacle on the way to
+thread-safety.\footnote{One might say it's the only obstacle, as pure
+code requires no synchronization and explicit interthread communication
+utilizes similarly explicit synchronization.}  A na\"ive approach is to
+synchronize all of the updates.  This is extremely costly: Haskell
+programs do a lot of thunk updates!
 
 Once again, our saving grace is purity: as thunks represent pure
 computation, evaluating a thunk twice has no observable effect: both
