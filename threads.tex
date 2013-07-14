@@ -19,7 +19,7 @@ describe a number of inter-thread communication mechanisms which are
 useful in concurrent programs (and say how to synchronize them). Finally
 describe what needs to be done to make \emph{compiled} code thread-safe.
 
-\subsection{Threads}
+\subsection{Concurrency}
 
 Concurrent Haskell~\cite{PeytonJones:1996:CH:237721.237794} exposes the
 abstraction of a \emph{Haskell thread} to a programmer. As the
@@ -80,7 +80,135 @@ loop is quite simple. Maintain a \emph{run queue} of threads, and repeatedly:
         \end{itemize}
 \end{enumerate}
 
-\subsection{Foreign function interface}
+\subsection{Multiprocessor execution}
+
+Generalizing the system to allow multiple Haskell threads to run truly
+simultaneously on multiple processors requires a fundamental
+reassessment of the execution platform.  We want to retain the concept
+of ligthweight threads, but allow them to run simultaneously on
+multiple processor cores.
+
+We therefore introduce the concept of a \emph{Haskell Execution
+  Context} (HEC).\footnote{In the implementation we use the term
+  ``Capability'' for historical reasons.}  The HEC represents the
+resources necessary for running Haskell code, and the permission to do
+so; a HEC can be owned by only one OS thread at a time, and that OS
+thread uses the HEC to run Haskell code.  The HEC is like a
+\emph{virtual processor}; we typically have one HEC per real processor
+core in the machine.
+
+For each piece of state that the running Haskell code needs access to,
+we must decide whether the data structure is \emph{shared} by the
+HECs, or if it is \emph{local}, so that each HEC maintains its
+own copy or portion of the data.  Access to any shared data must of
+course be appropriately synchronized.  Wherever possible, we prefer
+local data, because it can be accessed without synchronization or
+communication between processors.  Specifically, each HEC contains the
+following local data:
+
+\begin{itemize}
+\item A run queue of Haskell threads.  Threads always run on the same
+  HEC unless they are \emph{migrated}, which may happen as a result of
+  automatic load balancing (Section \ref{sec:load-balancing}).
+\item ToDo: more here ...
+\end{itemize}
+
+In many ways a HEC is like a mini-RTS, running a scheduler and
+managing its own queue of Haskell threads.  However, there is one
+significant piece of state that is shared between all the HECs: the
+heap.  We have no option but to make the heap shared, because
+Concurrent Haskell is designed around a shared data model, in which
+data can be implicitly shared between threads by virtue of being
+shared at the time the thread was forked, or subsequently explicitly
+shared via one of the synchronisation mechanisms.  Furthermore, we
+wish to use parallel programming models that depend on implicit
+sharing, such as sparks (Section \ref{sec:sparks}). (Languages such as
+Erlang, that are based on a concurrency programming model in which
+data is moved between processes explicitly, support an architecture of
+separate per-process heaps.)
+
+With the heap being shared between multiple running Haskell threads,
+we have to arrange that simultaneous access to heap objects is safe;
+we'll consider the issues around this later in
+Section~\ref{sec:parallel-heap}.
+
+Even though the heap is shared, it is crucial that each HEC be able to
+allocate memory from the heap without synchronisation.  Allocation
+happens rapidly in Haskell (1 GB per second is typical on a single
+core), so adding synchronisation to the fast path would destroy
+performance.  Hence, each HEC has its own private \emph{nursery} into
+which it can allocate. The garbage collector is tuned for recovering
+garbage in the nurseries quickly, the idea being that the nursery can
+fit in the cache, and we recycle it very quickly so that much of the
+garbage never even hits the main memory.  We describe this in more
+detail in Section~\ref{parallel-gc}.
+
+\subsection{Communication between HECs}
+
+While we strive to avoid any unnecessary communication between HECs in
+order to maximise parallel performance, there are situations where
+HECs must talk to each other.  These are:
+
+\begin{itemize}
+\item When a thread running on one HEC causes a thread on another HEC
+  to become \emph{unblocked}.
+\item When a thread running on one HEC encounters a \emph{black hole}
+  owned by a thread running on another HEC
+  (Section~\ref{sec:black-holes}).
+\item When a thread running on one HEC throws an asynchronous
+  exception to a thread running on another HEC
+  (Section~\ref{sec:asynchronous-exceptions}).
+\item When a HEC exhausts its nursery and needs to perform a garbage
+  collection (Section~\ref{sec:parallel-gc}).
+\item When the system is shutting down.
+\end{itemize}
+
+Except for the garbage collection and shutting down cases, these
+communications are all handled by \emph{message passing}.  The
+initiating HEC creates a message object in the heap, and adds it to
+the message queue of the receiving HEC (the message queue of a HEC is
+protected by a mutex).  It then interrupts the receiving HEC using
+software polling (Section~\ref{hplim-zero-trick}).  The receiving HEC
+collects the message from its message queue the next time it runs the
+scheduler loop, and takes whatever action is necessary, possibly
+responding with a reply of some kind.
+
+Message passing turns out to be an ideal technique in these situations
+for the following reasons:
+
+\begin{itemize}
+\item The message send is asynchronous; the current HEC can get on
+  with other work while it waits for a response.  In the cases where a
+  local thread is blocked waiting for something to happen on another
+  HEC, the current HEC just takes another thread from its thread queue
+  and continues working.
+
+\item Message passing allows us to declare certain pieces of state as
+  private to a particular HEC, which simplifies synchronization.  For
+  instance, threads themselves are heap objects (known as Thread State
+  Objects, or TSOs), but only the HEC that owns the thread may modify
+  its TSO.  For example, to unblock a thread that belongs to another
+  HEC, we send a message to the HEC that owns it, and that HEC will
+  modify the state of the thread appropriately and add it to the
+  queue.  Or it might find that the thread has already been unblocked
+  by another HEC---these race conditions are nicely solved by having a
+  single owner for the thread.
+\end{itemize}
+
+In the past the GHC runtime tried to use various locking and
+synchronization techniques to implement inter-HEC communication, but
+it was devilishly difficult to get right.  Switching to
+message-passing was a dramatic simplification.
+
+We mentioned earlier that garbage collection is the exception to this:
+in fact to perform a garbage collection we must interrupt all the HECs
+as fast as possible so they can perform the GC together.  This is done
+with software polling (Section~\ref{hplim-zero-trick}), and a global
+state to indicate that a GC is pending.  The global state itself is
+modified atomically, just in case two HECs happen to request a GC at
+the same time.
+
+\subsection{Concurrency and foreign function calls}
 
 The benefit of lightweight concurrency is that it offers a way of
 producing threads of control which are indistinguishable from OS
@@ -95,32 +223,39 @@ There isn't really any way around this problem without introducing true
 OS threads to the mix: what we'd like to do is arrange for the blocking
 FFI call and the scheduler to run on different OS threads concurrently.
 
-As it turns out, it is simpler to move the scheduler to a different OS
-thread than the FFI. Thus, we decompose OS threads into two parts: the
-OS thread itself (called a \emph{task} in GHC terminology), and the
-Haskell execution context (called a \emph{capability}).  The Haskell
-execution context contains the scheduler loop and is responsible for the
-contents of the run queue: when executing, it is owned exclusively by
-the particular task (OS thread) which is running it.  A single-threaded
-Haskell program has one capability: the capability is a \emph{global
-lock} on the Haskell runtime.  Now, before a blocking FFI call is made,
-the task releases the capability: if there is another idle \emph{worker
-thread}, it can acquire the now free capability and continue running
-Haskell code.
+With multiple OS threads running, we have to arrange that only one of
+the OS threads is running Haskell code at a given time (we'll relax
+this restriction in the next section).  Thus we introduce the concept
+of a \emph{Haskell Execution Context} (HEC), which is a data structure
+containing the resources necessary for running Haskell code---the
+heap, the run queue of threads, and so on.\footnote{In the
+  implementation we use the term ``Capability'' for historical
+  reasons.} The HEC is owned by a single OS thread at any given time,
+and the owning OS thread runs the scheduler, which runs Haskell
+threads from the run queue.  If a Haskell thread makes a foreign call,
+the OS thread running it \emph{releases} the HEC before making the
+call, and ensures that there is another OS thread ready to pick up the
+HEC and continue to run the other Haskell threads while the foreign
+call is in progress.  The HEC contains a pool of OS threads for this
+purpose, and more are created on demand.
 
-When an FFI call returns, we'd like to return the capability to the
+When an FFI call returns, we'd like to return the HEC to the
 original OS thread. Thus, we have to modify the scheduler loop as follows:
 
 \begin{enumerate}
-    \item Check if we need to yield the capability to some other OS thread, e.g. if an FFI call has just finished,
+    \item Check if we need to yield the HEC to some other OS thread, e.g. if an FFI call has just finished,
     \item \emph{Run as before.}
 \end{enumerate}
 
+\subsection{Bound Threads}
+
+\SM{I think we could move this later.}
+
 Another place where Haskell threads differ from OS threads is thread
-local state.  As capabilities are passed around OS threads, we make no
+local state.  As HECs are passed between OS threads, we make no
 guarantee that any given FFI call will be performed on the same OS
 thread as the previous FFI call.  To accomodate Haskell threads which
-rely on thread-local state, Haskell introduces a \emph{bound thread},
+rely on thread-local state, GHC introduces the notion of a \emph{bound thread},
 which binds a Haskell thread to a fresh OS thread.\footnote{GHC
     also calls these \emph{in-calls}, due to the fact that external code
     which calls into Haskell must be bound: if it makes the Haskell code
@@ -128,19 +263,19 @@ calls out via the FFI again, the inner and outer C code may rely on the
 same thread local state.}
 
 How can we support bound threads?  A simple scheme is to give each bound
-thread its own OS thread.  However, if we have only one capability, we
+thread its own OS thread.  However, if we have only one HEC, we
 need to coordinate these new OS threads so that only one is running
 Haskell code at a time.  We can do this by, once again, passing the
-capability to whichever OS thread truly needs to run the bound thread:
+HEC to whichever OS thread truly needs to run the bound thread:
 
 \begin{enumerate}
-    \item \emph{Check if we need to yield the capability to some other OS thread, e.g. if an FFI call has just finished,}
+    \item \emph{Check if we need to yield the HEC to some other OS thread, e.g. if an FFI call has just finished,}
     \item \emph{Pop the next thread off of the run queue,}
     \item Check if the thread is bound:
         \begin{itemize}
             \item If the thread is bound but is already scheduled on the OS thread, proceed.
-            \item If the thread is bound but on the wrong OS thread, give the capability to the correct task.
-            \item If the thread is not bound but this OS thread is bound, give up the capability, so that any capability that truly needs this OS thread will be able to get it.
+            \item If the thread is bound but on the wrong OS thread, give the HEC to the correct task.
+            \item If the thread is not bound but this OS thread is bound, give up the HEC, so that any HEC that truly needs this OS thread will be able to get it.
         \end{itemize}
     \item \emph{Run as before.}
 \end{enumerate}
@@ -148,34 +283,35 @@ capability to whichever OS thread truly needs to run the bound thread:
 While the movement of capabilities from task to task is somewhat intricate,
 it imposes no overhead when bound threads are not used.
 
-\subsection{Load balancing}
+\subsection{Multiprocessor execution}
 
 Assuming that the compiled Haskell code is thread safe~(see
 Section~\ref{sec:sync}), it is now very simple to parallelize execution:
-allocate multiple capabilities!  Each OS thread in possession of a
-capability runs the scheduler loop, and everything works the way you'd
+allocate multiple HECs!  Each OS thread in possession of a
+HEC runs the scheduler loop, and everything works the way you'd
 expect.
 
-There is one primary design choice: should each capability have its own
+There is one primary design choice: should each HEC have its own
 run queue, or should there be a single global run queue?  A global run
 queue avoids the need for any sort of load balancing, but requires
 synchronization and makes it difficult to keep Haskell threads running on
 the same core, destroying data locality.  With separate run queues, however,
-threads must be load balanced: one capability could accumulate too many
-threads while the other capabilities idle.
+threads must be load balanced: one HEC could accumulate too many
+threads while the other HECs idle.
 
 The very simple load balancing scheme GHC uses is as follows: when a
-capability runs out of threads to run, it suspends itself (releasing its
-lock) and waits on a condition variable.  When a capability has too many
+HEC runs out of threads to run, it suspends itself (releasing its
+lock) and waits on a condition variable.  When a HEC has too many
 threads to run (it checks each iteration of its schedule loop), it takes
-out locks on as many idle capabilities as it can and pushes its excess
+out locks on as many idle HECs as it can and pushes its excess
 threads onto their run queues.  Finally, it releases the locks and
-signals on each idle capabilities that they can start running.  The
+signals on each idle HECs that they can start running.  The
 benefit of this scheme is that the run queues are kept completely
 unsynchronized, but a plausible alternative is to use work-stealing
 queues.
 
 \subsection{Sparks}
+\label{sec:sparks}
 
 \emph{Sparks}~\cite{Marlow2009} are a mechanism for speculative parallel computation.
 When a program is not utilizing all of its CPUs, the other CPUs can be
@@ -194,15 +330,15 @@ computation back to the thread that requested it.
 
 Given thread-safe thunks, the implementation of sparks is quite simple:
 when a computation is sparked, it is stored in a \emph{spark pool}
-associated with a capability.  When a capability has no work to do (e.g.
+associated with a HEC.  When a HEC has no work to do (e.g.
 its run queue is empty), it creates a \emph{spark thread}, which
-repeatedly attempts to retrieve a spark from the capability's spark pool
+repeatedly attempts to retrieve a spark from the HEC's spark pool
 and evaluate it.  Thunk update ensures the results get propagated back
-to the main thread. If the capability receives any real work, it
+to the main thread. If the HEC receives any real work, it
 immediately terminates the spark thread.
 
 Whereas threads rarely need to be load balanced, sparks frequently need
-to be migrated, as the capability that is generating sparks is likely to
+to be migrated, as the HEC that is generating sparks is likely to
 be the one that is also doing real work.  Sparks are balanced using
 bounded work-stealing queues~\cite{Arora:1998:TSM:277651.277678,Hendler2005}, where a spark thread goes and steals
 sparks from other threads when it has none to execute.
@@ -218,6 +354,7 @@ these conditions in the garbage collector, by traversing the spark pool
 and checking if the spark points to a thunk that was successfully evacuated.\footnote{An alternate design is to have sparks be GC roots, so that an outstanding spark keeps its data alive. While this is convenient for the implementation of \emph{parallel strategies}, it can result in space leaks, and GHC no longer uses this strategy.}
 
 \subsection{MVars}
+\label{sec:MVar}
 
 Haskell offers a variety of ways for Haskell threads to interact with
 each other.  We now describe how to implement MVars, the simplest form
@@ -249,6 +386,7 @@ objects, if the MVar a thread is blocking on becomes unreachable,
 a blocked thread is deadlocked and terminate it.
 
 \subsection{Asynchronous exceptions}
+\label{sec:asynchronous-exceptions}
 
 MVars are a cooperative form of communication, where a thread must
 explicitly opt-in to receive messages.  Asynchronous
@@ -347,25 +485,25 @@ runtime makes very sparing use of OS level condition variables and
 mutexes, since they tend to be expensive.
 
 GHC uses a very simple message passing architecture to pass messages
-between capabilities.  A capability sends a message by:
+between HECs.  A HEC sends a message by:
 
 \begin{enumerate}
     \item Allocating a message object on the heap;
-    \item Taking out a lock on the message inbox of the destination capability;
+    \item Taking out a lock on the message inbox of the destination HEC;
     \item Appending the message onto the inbox;
-    \item Interrupting the capability, using the same mechanism as the context switch timer (setting the heap limit to zero); and
+    \item Interrupting the HEC, using the same mechanism as the context switch timer (setting the heap limit to zero); and
     \item Releasing the lock.
 \end{enumerate}
 
-This allows the message to be handled by the destination capability at
+This allows the message to be handled by the destination HEC at
 its convenience, i.e. after the running Haskell code yields and we
 return to the scheduling loop.  In general, the benefit of message
 passing systems is that they remove the need for synchronizing any of
-the non-local state that another capability \emph{might} want to modify: instead,
-the capability just sends a message asking for the state to be modified.
+the non-local state that another HEC \emph{might} want to modify: instead,
+the HEC just sends a message asking for the state to be modified.
 
 When sending a message is not appropriate, e.g. in the case of
-synchronized access to closures which are not owned by any capability in
+synchronized access to closures which are not owned by any HEC in
 particular, GHC instead uses a very simple spinlock on the closure
 \emph{header}, replacing the header with a \emph{white hole} header that
 indicates the object is locked.  If another thread enters the closure,
@@ -376,9 +514,9 @@ be expensive to allocate a mutex for every closure that needed one.
 We can now describe how MVars and asynchronous exceptions are
 synchronized.  An MVar uses a white hole on the MVar itself to protect
 manipulations of the blocked thread queue; additionally, when it needs
-to wakeup a thread, it may need to send a message to the capability
+to wakeup a thread, it may need to send a message to the HEC
 which owns the unblocked thread.  An asynchronous exception is even
-simpler: it is simply a message to the capability which owns the thread.
+simpler: it is simply a message to the HEC which owns the thread.
 
 \subsection{Summary}
 
