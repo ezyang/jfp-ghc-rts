@@ -1,7 +1,7 @@
 \section{Storage}
 
 An essential component of a runtime system for any high-level
-programming language is the garbage collector, which is responsible
+programming language is the garbage collector, which is responsible for
 identifying and reclaiming memory from objects which are no longer in
 use by the program.  When it comes to a garbage collector,
 \emph{efficiency} is the order of the day: the speed of the garbage
@@ -24,18 +24,20 @@ in fiddling with black magic tuning parameters.
 
 A more flexible scheme is a \emph{block-structured heap}~\cite{maclisp,Dybvig94don'tstop,Marlow:2008:PGG:1375634.1375637}.
 The basic idea is to divide the heap into fixed-size $B$-byte blocks,
-where $B$ is a power of two: blocks are then linked together in order to
+where $B$ is a power of two: blocks are then linked together into chains in order to
 provide memory for the heap.\footnote{GHC uses 4kb blocks, but this is an easily
 adjustable constant.}  These blocks need not be contiguous: thus, if your
 heap runs out of space, instead of having to double the size of your heap,
 you can simply chain a few more blocks onto it.  There are some other benefits as well:
 
 \begin{enumerate}
-    \item Large objects (e.g. close to block size) do not have to be copied from one region to
+    \item Large objects (i.e., block sized or larger) do not have to be copied from one region to
         another; instead, the block they reside in can be relinked from
         one region to another.\footnote{Of course, this requires \emph{only}
         one object to live in a block, which can result in fragmentation.
         However, empirically this does not seem to have caused much of a problem.}
+    \item Free memory can be recycled quickly, since a free block can be quickly
+        reused somewhere else.
     \item Blocks make it easy to provide heap memory in contexts where it is
         not possible to perform garbage collection.  As an example, consider
         the GMP arbitrary-precision arithmetic library.  This C code requires
@@ -47,12 +49,10 @@ you can simply chain a few more blocks onto it.  There are some other benefits a
         able to identify all pointers to the heap that it may be holding.  Whereas
         in a block-structured heap, we can simply grab a new block and defer the GC
         until later.
-    \item Free memory can be recycled quickly, since a free block can be quickly
-        reused somewhere else.
 \end{enumerate}
 
 One reason why this scheme works so well is that most objects on the
-heap are much smaller than the block size; handling these cases is very
+heap are much smaller than the block size, so handling these cases is very
 simple.  When an object is larger than a block size, it needs to be
 placed into a \emph{block group} of contiguous blocks---which in turn
 need to be handled with some care to avoid fragmentation.  The blocks
@@ -61,12 +61,19 @@ themselves are provided by the operating system in large units called
 
 Finally, each block is associated with a \emph{block descriptor}, which
 contains information about the block such as what generation it belongs to, how full it is, what block
-group it is part of, etc.  An obvious place to put the block descriptor
-is at the beginning of a block, but this runs into problems when the block
-is the member of a block group (the memory must be contiguous!)
-Thus, the descriptors of blocks of a megablock are instead organized together
-in the first block of a megablock; some care is taken to ensure that the
-runtime can efficiently compute the block descriptor of any given block.
+group it is part of, and so on.  Finding the block descriptor
+associated with a given address in memory is a very common
+operation---the garbage collector needs to do this for every object it
+visits, for example.  Hence the placement of the block descriptor is
+designed such that the block descriptor for a given address is a pure function
+of the address, and can be computed in a few instructions.
+
+An obvious place to put the block descriptor is at the beginning of a
+block, but this runs into problems when the block is a member of a
+block group (the memory must be contiguous!).  Thus, the descriptors
+of blocks of a megablock are instead organized together at the
+beginning of a megablock, and megablocks themselves are required to be
+megablock-aligned in memory.
 
 \subsection{Memory layout}
 
@@ -211,6 +218,7 @@ pointing to it, it cannot be evacuated again within the same GC.
 % \SM{You captured all the issues here well. Nice job!}
 
 \subsection{Parallel garbage collection}
+\label{sec:parallel-gc}
 
 A generational garbage collector offers quite good performance, but
 there is still the question, ``Is it fast enough?''  One avenue for
