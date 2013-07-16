@@ -10,6 +10,20 @@ runtime, and thus the GHC runtime devotes a substantial portion of its
 complexity budget to a fast garbage collector.  What do we need for
 a fast garbage collector?
 
+%   you should block structure your heap
+%   garbage collection in GHC is cheaper than you thinko
+%   produce a lot more garbage than imperative languages
+%   the larger percent of your values are garbage, the faster it works
+%   immutable data never points to younger values
+%   gc is hard, but gc for immutable languages is much easier
+
+%   .NET advice:
+%       Allocate all of the memory (or as much as possible) to be used with a given data structure at the same time.
+%       Remove temporary allocations that can be avoided with little penalty in complexity.
+%       Minimize the number of times object pointers get written, especially those writes made to older objects.
+%       Reduce the density of pointers in your data structures.
+%       Make limited use of finalizers, and then only on "leaf" objects, as much as possible. Break objects if necessary to help with this.
+
 \subsection{Blocks}
 
 The very first consideration is a low-level one: ``Where is the memory coming
