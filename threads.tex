@@ -315,6 +315,7 @@ There isn't really any way around this problem without introducing true
 OS threads to the mix: what we'd like to do is arrange for the blocking
 FFI call and the scheduler to run on different OS threads concurrently.
 
+\slpj{Duplicate HEC intro.}
 With multiple OS threads running, we have to arrange that only one of
 the OS threads is running Haskell code at a given time (we'll relax
 this restriction in the next section).  Thus we introduce the concept

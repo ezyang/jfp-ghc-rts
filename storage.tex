@@ -91,6 +91,8 @@ megablock-aligned in memory.
 
 \subsection{Memory layout}
 
+\slpj{Diagram of object layout, info tables}
+
 Before we can discuss the garbage collector proper, we have to describe
 the layout of the data that is to be garbage collector.  GHC has a uniform
 representation for objects on the heap with a \emph{header}, which indicates
@@ -234,6 +236,8 @@ pointing to it, it cannot be evacuated again within the same GC.
 \subsection{Parallel garbage collection}
 \label{sec:parallel-gc}
 
+\slpj{Missing point: one allocation area per HEC.}
+
 A generational garbage collector offers quite good performance, but
 there is still the question, ``Is it fast enough?''  One avenue for
 speeding up the garbage collector when multiple cores are available is
@@ -284,6 +288,7 @@ synchronization, because it is safe to have multiple copies of an
 immutable data structure!  Eliminating the locks in these cases accounts
 for a 20-30\% speedup, which is nothing to sneeze at.
 
+\slpj{This para doesn't seem o have anythign to do with parallel gc.}
 One important parameter which must be set properly is the size of the
 young generation, i.e. the nursery.  If the nursery is too small, then
 we will need to perform minor garbage collections too frequently.  But
@@ -315,6 +320,7 @@ having the nursery be the size of the cache is generally the best setting.
 
 \SM{Not sure whether going into this much detail is helpful to the
   average reader.  I'm prepared to be persuaded otherwise.}
+\slpj{I like this section!  The earlier sections are too discursive; at last this one gives some detail.}
 
 We conclude by sketching the overall operation of GHC's parallel,
 generational, block-structured garbage collector, with all of the
@@ -382,7 +388,7 @@ discussed here.  These include:
 \begin{itemize}
     \item an implementation of a compacting collector, \Red{no docs about this!}
     \item support for weak pointers and finalizers,~\cite{PeytonJones:1999:SSM:647978.743369} \Red{We might actually want to talk about this, it is probably one of the more voodoo-y parts of the system} and
-    \item garbage collection of static objects.
+    \item garbage collection of static objects. \slpj{The CAF story really is worth telling.}
 \end{itemize}
 
 We have also omitted many details about the features we have discussed.
